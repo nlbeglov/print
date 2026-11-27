@@ -106,6 +106,17 @@ namespace EpsPrint
             sb.Append(' ', indent * 2);
         }
 
+        /// <summary>«…_00850027846491_0.eps» → GTIN «00850027846491» и номер кода 0.</summary>
+        public static bool TryParseGtin(string name, out string gtin, out int index)
+        {
+            gtin = null;
+            index = 0;
+            var m = Regex.Match(Path.GetFileName(name), @"(?:^|_)(\d{8,14})_(\d+)\.eps[fi]?$", RegexOptions.IgnoreCase);
+            if (!m.Success) return false;
+            gtin = m.Groups[1].Value;
+            return int.TryParse(m.Groups[2].Value, out index);
+        }
+
         /// <summary>«318d3a02-…-eb954bd40432_00850027846491_0.eps» → «00850027846491_0.eps»</summary>
         public static string DisplayName(string name)
         {

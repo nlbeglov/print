@@ -20,7 +20,7 @@ set REFS=/r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Window
 set OPTS=/nologo /optimize+ /codepage:65001 /platform:anycpu
 
 echo Building EpsPrint.exe ...
-"%CSC%" %OPTS% /target:winexe /out:dist\EpsPrint.exe %REFS% src\*.cs shared\Version.cs || goto :fail
+"%CSC%" %OPTS% /target:winexe /out:dist\EpsPrint.exe %REFS% /r:System.Web.Extensions.dll src\*.cs shared\Version.cs || goto :fail
 
 echo Building Updater.exe ...
 "%CSC%" %OPTS% /target:winexe /out:dist\Updater.exe %REFS% /r:System.Web.Extensions.dll updater\*.cs shared\Version.cs || goto :fail

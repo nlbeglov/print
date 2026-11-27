@@ -11,6 +11,8 @@ namespace EpsPrint
         public string Path;          // копия во временной папке
         public string Name;          // исходное имя файла
         public string DisplayName;   // имя для списка
+        public string Gtin;          // код товара из имени файла (…_00850027846491_0.eps)
+        public int CodeIndex;        // номер кода этого товара (0, 1, 2…)
         public Bitmap Preview;       // картинка для превью
         public float WidthMm;        // реальный размер рисунка
         public float HeightMm;
@@ -48,6 +50,23 @@ namespace EpsPrint
         public float Percent;
         public bool MultiPerSheet, Rotate90, Collate;
         public int Copies;
+    }
+
+    /// <summary>Размер наклейки в рулоне (ширина поперёк принтера × длина по ходу).</summary>
+    class StickerItem
+    {
+        public float W, H;
+        public bool IsCustom;
+
+        public string Key
+        {
+            get { return IsCustom ? "custom" : W.ToString(System.Globalization.CultureInfo.InvariantCulture) + "x" + H.ToString(System.Globalization.CultureInfo.InvariantCulture); }
+        }
+
+        public override string ToString()
+        {
+            return IsCustom ? "Свой размер…" : string.Format("{0:0.#} × {1:0.#} мм", W, H);
+        }
     }
 
     class PaperItem

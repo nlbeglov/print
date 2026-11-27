@@ -10,6 +10,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
+using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
 namespace EpsPrint
@@ -38,20 +39,33 @@ namespace EpsPrint
         PreviewPanel preview;
         Label pageLabel;
         Button prevBtn, nextBtn;
-        ComboBox printerCombo, paperCombo;
-        NumericUpDown customW, customH, percentNum, marginNum, gapNum, copiesNum;
-        RadioButton portraitRb, landscapeRb, fitRb, actualRb, customRb, oneRb, multiRb;
-        CheckBox rotateCb, collateCb;
-        RadioButton allPagesRb, currentPageRb, rangeRb;
+        ToolStripStatusLabel statusLabel;
+
+        // Главные шаги 1–4
+        ComboBox printerCombo, paperCombo, stickerCombo, printWhatCombo;
+        Label printerKindLabel, sizeHeader;
+        Control paperSizeRow, stickerSizeRow, rangeRow;
+        NumericUpDown customW, customH, stickerW, stickerH, copiesNum;
+        RadioButton fitRb, actualRb;
+        CheckBox rotateCb, multiCb;
         TextBox rangeBox;
-        CheckBox directCb;
-        ComboBox langCombo, dpiCombo;
-        NumericUpDown labelGapNum;
-        Control labelPanel;
-        List<Control> driverOnly = new List<Control>();
         Button printBtn;
         Label summaryLabel;
-        ToolStripStatusLabel statusLabel;
+
+        // «Ещё настройки»
+        LinkLabel moreLink;
+        Control advPanel, paperAdv, labelAdv;
+        CheckBox labelPrinterCb, customScaleCb, collateCb, useDriverCb;
+        NumericUpDown percentNum, marginNum, gapNum, offXNum, offYNum, labelGapNum;
+        RadioButton portraitRb, landscapeRb;
+        ComboBox langCombo, dpiCombo;
+        // Сведения о товарах из attributes.json (ключ — GTIN) и прочие текстовые файлы из архивов
+        readonly Dictionary<string, Dictionary<string, object>> products = new Dictionary<string, Dictionary<string, object>>();
+        readonly List<Tuple<string, string>> rawInfos = new List<Tuple<string, string>>();
+        bool labelMode;   // принтер для наклеек: размер «листа» = размер наклейки в рулоне
+
+        static readonly float[,] StickerPresets = {
+            { 20, 20 }, { 30, 20 }, { 40, 30 }, { 43, 25 }, { 58, 30 }, { 58, 40 }, { 58, 60 }, { 75, 120 }, { 100, 150 } };
 
         public MainForm(string[] args)
         {
@@ -126,7 +140,7 @@ namespace EpsPrint
             selBar.Controls.Add(allBtn);
             selBar.Controls.Add(noneBtn);
             left.Controls.Add(selBar, 0, 2);
-            left.Controls.Add(Header("Информация из архива (на печать не идёт)"), 0, 3);
+            left.Controls.Add(Header("О товаре (из attributes.json, на печать не идёт)"), 0, 3);
             infoBox = new TextBox
             {
                 Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both,
@@ -151,7 +165,7 @@ namespace EpsPrint
             center.Controls.Add(nav, 0, 1);
             root.Controls.Add(center, 1, 1);
 
-            // Правая колонка: настройки
+            // Правая колонка: 4 шага + «Ещё настройки»
             const int W = 290;
             var right = new FlowLayoutPanel
             {
@@ -159,106 +173,127 @@ namespace EpsPrint
                 AutoScroll = true, Padding = new Padding(4, 0, 6, 6)
             };
 
-            right.Controls.Add(Header("Принтер"));
+            // 1. Принтер
+            right.Controls.Add(Header("1. Принтер"));
             printerCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = W };
             printerCombo.SelectedIndexChanged += (s, e) => OnPrinterChanged();
             right.Controls.Add(printerCombo);
-            var propsBtn = new Button { Text = "Дополнительные настройки принтера…", Width = W, Height = 28 };
-            propsBtn.Click += (s, e) => ShowPrinterDialog();
-            right.Controls.Add(propsBtn);
+            printerKindLabel = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(W, 0), Margin = new Padding(3, 2, 3, 0) };
+            right.Controls.Add(printerKindLabel);
 
-            right.Controls.Add(Header("Этикеточный принтер (Zebra)"));
-            directCb = new CheckBox { Text = "Прямая печать на этикетки\n(размер этикетки = размер файла)", AutoSize = true };
-            directCb.CheckedChanged += (s, e) => RebuildPages();
-            right.Controls.Add(directCb);
-            langCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 135 };
-            langCombo.Items.AddRange(new object[] { "EPL (TLP 2844)", "ZPL (модели -Z)" });
-            langCombo.SelectedIndex = 0;
-            dpiCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 135 };
-            dpiCombo.Items.AddRange(new object[] { "203 dpi", "300 dpi" });
-            dpiCombo.SelectedIndex = 0;
-            labelGapNum = Num(0, 20, 1, 3);
-            var calibrateBtn = new Button { Text = "Калибровать (если печать сбилась)", Width = W, Height = 28 };
-            calibrateBtn.Click += (s, e) => Calibrate();
-            labelPanel = Group(FlowDirection.TopDown,
-                Row("Язык принтера:", langCombo), Row("Разрешение:", dpiCombo),
-                Row("Зазор между, мм:", labelGapNum), calibrateBtn);
-            right.Controls.Add(labelPanel);
-
-            right.Controls.Add(Header("Бумага"));
+            // 2. Размер наклейки / бумага
+            sizeHeader = Header("2. Размер наклейки");
+            right.Controls.Add(sizeHeader);
+            stickerCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = W, DropDownHeight = 400 };
+            for (int i = 0; i < StickerPresets.GetLength(0); i++)
+                stickerCombo.Items.Add(new StickerItem { W = StickerPresets[i, 0], H = StickerPresets[i, 1] });
+            stickerCombo.Items.Add(new StickerItem { IsCustom = true });
+            stickerCombo.SelectedIndexChanged += (s, e) => RebuildPages();
+            right.Controls.Add(stickerCombo);
+            stickerW = Num(5, 300, 1, 40);
+            stickerH = Num(5, 500, 1, 30);
+            stickerSizeRow = SizeRow("Ширина × длина:", stickerW, stickerH);
+            right.Controls.Add(stickerSizeRow);
             paperCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = W, DropDownHeight = 400 };
             paperCombo.SelectedIndexChanged += (s, e) => RebuildPages();
             right.Controls.Add(paperCombo);
             customW = Num(10, 2000, 1, 100);
             customH = Num(10, 2000, 1, 150);
-            right.Controls.Add(Row("Ширина, мм:", customW));
-            right.Controls.Add(Row("Высота, мм:", customH));
-            portraitRb = Radio("Книжная");
-            landscapeRb = Radio("Альбомная");
-            portraitRb.Checked = true;
-            right.Controls.Add(Group(FlowDirection.LeftToRight, portraitRb, landscapeRb));
+            paperSizeRow = SizeRow("Ширина × высота:", customW, customH);
+            right.Controls.Add(paperSizeRow);
 
-            right.Controls.Add(Header("Масштаб"));
-            fitRb = Radio("Вписать в лист");
-            actualRb = Radio("Реальный размер (100%)");
-            customRb = Radio("Свой масштаб, %:");
-            percentNum = Num(5, 1000, 0, 100);
-            percentNum.Enter += (s, e) => customRb.Checked = true;
-            Exclusive(fitRb, actualRb, customRb);
-            right.Controls.Add(fitRb);
-            right.Controls.Add(actualRb);
-            right.Controls.Add(Group(FlowDirection.LeftToRight, customRb, percentNum));
-            rotateCb = new CheckBox { Text = "Повернуть на 90°", AutoSize = true };
-            rotateCb.CheckedChanged += (s, e) => RebuildPages();
+            // 3. Рисунок
+            right.Controls.Add(Header("3. Рисунок"));
+            actualRb = Radio("Как в файле (настоящий размер)");
+            fitRb = Radio("Растянуть на всю наклейку");
+            actualRb.Checked = true;
+            right.Controls.Add(Group(FlowDirection.TopDown, actualRb, fitRb));
+            rotateCb = Check("Повернуть на 90°");
             right.Controls.Add(rotateCb);
+            multiCb = Check("Несколько рисунков на одном листе");
+            right.Controls.Add(multiCb);
 
-            right.Controls.Add(Header("Размещение"));
-            oneRb = Radio("Один рисунок на лист");
-            multiRb = Radio("Несколько на листе (экономия бумаги)");
-            oneRb.Checked = true;
-            right.Controls.Add(Group(FlowDirection.TopDown, oneRb, multiRb));
-            marginNum = Num(0, 50, 1, 5);
-            gapNum = Num(0, 50, 1, 3);
-            right.Controls.Add(Row("Поля, мм:", marginNum));
-            right.Controls.Add(Row("Промежуток, мм:", gapNum));
-
-            right.Controls.Add(Header("Копии"));
+            // 4. Сколько печатать
+            right.Controls.Add(Header("4. Сколько печатать"));
             copiesNum = Num(1, 999, 0, 1);
             right.Controls.Add(Row("Копий каждого:", copiesNum));
-            collateCb = new CheckBox { Text = "Комплектами (1,2,3, 1,2,3…)", AutoSize = true, Checked = true };
-            collateCb.CheckedChanged += (s, e) => RebuildPages();
-            right.Controls.Add(collateCb);
-
-            right.Controls.Add(Header("Что печатать"));
-            allPagesRb = Radio("Все листы");
-            currentPageRb = Radio("Только текущий лист (пробная печать)");
-            rangeRb = Radio("Листы:");
-            rangeBox = new TextBox { Width = 130 };
-            rangeBox.TextChanged += (s, e) =>
-            {
-                if (!rangeRb.Checked && rangeBox.Focused) rangeRb.Checked = true;
-                else RebuildPages();
-            };
-            rangeBox.Enter += (s, e) => rangeRb.Checked = true;
-            Exclusive(allPagesRb, currentPageRb, rangeRb);
-            allPagesRb.Checked = true;
-            right.Controls.Add(allPagesRb);
-            right.Controls.Add(currentPageRb);
-            right.Controls.Add(Group(FlowDirection.LeftToRight, rangeRb, rangeBox));
-            right.Controls.Add(new Label { Text = "например: 1-3, 5", AutoSize = true, ForeColor = Color.DimGray, Margin = new Padding(24, 0, 3, 3) });
+            printWhatCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 135 };
+            printWhatCombo.Items.AddRange(new object[] { "Все", "Только в превью", "Выбрать номера…" });
+            printWhatCombo.SelectedIndex = 0;
+            printWhatCombo.SelectedIndexChanged += (s, e) => RebuildPages();
+            right.Controls.Add(Row("Печатать:", printWhatCombo));
+            rangeBox = new TextBox { Width = 120 };
+            rangeBox.TextChanged += (s, e) => RebuildPages();
+            rangeRow = Group(FlowDirection.LeftToRight, rangeBox,
+                new Label { Text = "например: 1-3, 5", AutoSize = true, ForeColor = Color.DimGray, Margin = new Padding(4, 6, 0, 0) });
+            right.Controls.Add(rangeRow);
 
             printBtn = new Button
             {
                 Text = "ПЕЧАТЬ", Width = W, Height = 50,
                 Font = new Font(this.Font.FontFamily, 13f, FontStyle.Bold),
                 BackColor = Color.FromArgb(0, 120, 215), ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat, Margin = new Padding(3, 16, 3, 6)
+                FlatStyle = FlatStyle.Flat, Margin = new Padding(3, 14, 3, 6)
             };
             printBtn.FlatAppearance.BorderSize = 0;
             printBtn.Click += (s, e) => DoPrint();
             right.Controls.Add(printBtn);
             summaryLabel = new Label { AutoSize = true, MaximumSize = new Size(W, 0) };
             right.Controls.Add(summaryLabel);
+
+            // Ещё настройки (скрыты по умолчанию)
+            moreLink = new LinkLabel { Text = "▸ Ещё настройки", AutoSize = true, Margin = new Padding(3, 14, 3, 3) };
+            right.Controls.Add(moreLink);
+
+            customScaleCb = Check("Свой масштаб, %:");
+            percentNum = Num(5, 1000, 0, 100);
+            collateCb = Check("Копии комплектами (1,2,3, 1,2,3…)");
+            collateCb.Checked = true;
+            labelPrinterCb = Check("Это принтер для наклеек (рулон)");
+            labelPrinterCb.CheckedChanged += (s, e) => { labelMode = labelPrinterCb.Checked; RebuildPages(); };
+            var propsBtn = new Button { Text = "Свойства принтера…", Width = 200, Height = 28 };
+            propsBtn.Click += (s, e) => ShowPrinterDialog();
+
+            portraitRb = Radio("Книжная");
+            landscapeRb = Radio("Альбомная");
+            portraitRb.Checked = true;
+            marginNum = Num(0, 50, 1, 5);
+            gapNum = Num(0, 50, 1, 3);
+            paperAdv = Group(FlowDirection.TopDown,
+                Group(FlowDirection.LeftToRight, portraitRb, landscapeRb),
+                Row("Поля, мм:", marginNum),
+                Row("Между рисунками, мм:", gapNum));
+
+            offXNum = Num(-50, 50, 1, 0);
+            offYNum = Num(-50, 50, 1, 0);
+            labelGapNum = Num(0, 20, 1, 3);
+            langCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 130 };
+            langCombo.Items.AddRange(new object[] { "EPL (TLP 2844)", "ZPL (модели -Z)" });
+            langCombo.SelectedIndex = 0;
+            dpiCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 130 };
+            dpiCombo.Items.AddRange(new object[] { "203 dpi", "300 dpi" });
+            dpiCombo.SelectedIndex = 0;
+            var calibrateBtn = new Button { Text = "Калибровать (если печать съехала)", Width = 270, Height = 28 };
+            calibrateBtn.Click += (s, e) => Calibrate();
+            useDriverCb = Check("Печатать через драйвер Windows");
+            labelAdv = Group(FlowDirection.TopDown,
+                Row("Сдвиг вправо, мм:", offXNum),
+                Row("Сдвиг вниз, мм:", offYNum),
+                Row("Зазор между, мм:", labelGapNum),
+                Row("Язык принтера:", langCombo),
+                Row("Разрешение:", dpiCombo),
+                calibrateBtn, useDriverCb);
+
+            advPanel = Group(FlowDirection.TopDown,
+                Group(FlowDirection.LeftToRight, customScaleCb, percentNum),
+                collateCb, labelPrinterCb, paperAdv, labelAdv, propsBtn);
+            advPanel.Visible = false;
+            right.Controls.Add(advPanel);
+            moreLink.LinkClicked += (s, e) =>
+            {
+                advPanel.Visible = !advPanel.Visible;
+                moreLink.Text = advPanel.Visible ? "▾ Скрыть настройки" : "▸ Ещё настройки";
+            };
             root.Controls.Add(right, 2, 1);
 
             var status = new StatusStrip();
@@ -267,11 +302,23 @@ namespace EpsPrint
 
             Controls.Add(root);
             Controls.Add(status);
+        }
 
-            // эти настройки не нужны в режиме прямой печати на этикетки
-            driverOnly.AddRange(new Control[] {
-                paperCombo, customW.Parent, customH.Parent, portraitRb.Parent,
-                fitRb, actualRb, customRb.Parent, oneRb.Parent, marginNum.Parent, gapNum.Parent });
+        CheckBox Check(string text)
+        {
+            var c = new CheckBox { Text = text, AutoSize = true };
+            c.CheckedChanged += (s, e) => RebuildPages();
+            return c;
+        }
+
+        static Control SizeRow(string label, NumericUpDown w, NumericUpDown h)
+        {
+            w.Width = 62;
+            h.Width = 62;
+            return Group(FlowDirection.LeftToRight,
+                new Label { Text = label, AutoSize = true, Margin = new Padding(3, 6, 3, 0) }, w,
+                new Label { Text = "×", AutoSize = true, Margin = new Padding(0, 6, 0, 0) }, h,
+                new Label { Text = "мм", AutoSize = true, Margin = new Padding(0, 6, 0, 0) });
         }
 
         Label Header(string text)
@@ -345,9 +392,6 @@ namespace EpsPrint
             string pick = null;
             if (!string.IsNullOrEmpty(saved) && printerCombo.Items.Contains(saved)) pick = saved;
             if (pick == null)
-                foreach (string p in printerCombo.Items)
-                    if (p.IndexOf("M132", StringComparison.OrdinalIgnoreCase) >= 0) { pick = p; break; }
-            if (pick == null)
             {
                 string def = new PrinterSettings().PrinterName;
                 if (printerCombo.Items.Contains(def)) pick = def;
@@ -365,24 +409,40 @@ namespace EpsPrint
             printerSettings = new PrinterSettings();
             printerSettings.PrinterName = name;
             LoadPapers(prevPaper ?? settings.Get("paper", "A4"));
-            ApplyLabelDefaults(name);
+            ApplyPrinterDefaults(name);
             RebuildPages();
         }
 
-        /// <summary>Для Zebra прямая печать включается сама; выбор пользователя запоминается для каждого принтера.</summary>
-        void ApplyLabelDefaults(string name)
+        /// <summary>Настройки, которые запоминаются для каждого принтера отдельно.</summary>
+        void ApplyPrinterDefaults(string name)
         {
             bool wasInit = initializing;
             initializing = true;
             try
             {
-                directCb.Checked = settings.GetBool("direct|" + name, LabelPrinter.LooksLikeLabelPrinter(name));
+                labelPrinterCb.Checked = settings.GetBool("label|" + name, LabelPrinter.LooksLikeLabelPrinter(name));
+                labelMode = labelPrinterCb.Checked;
+                useDriverCb.Checked = settings.GetBool("driver|" + name, false);
                 string lang = settings.Get("lang|" + name, null);
                 bool zpl = lang != null ? lang == "zpl" : LabelPrinter.GuessLanguage(name) == LabelLanguage.Zpl;
                 langCombo.SelectedIndex = zpl ? 1 : 0;
                 dpiCombo.SelectedIndex = settings.Get("dpi|" + name, "203") == "300" ? 1 : 0;
+                SelectSticker(settings.Get("sticker|" + name, "40x30"));
+                SetNum(offXNum, settings.GetNum("offX|" + name, 0));
+                SetNum(offYNum, settings.GetNum("offY|" + name, 0));
             }
             finally { initializing = wasInit; }
+        }
+
+        void SelectSticker(string key)
+        {
+            int idx = -1;
+            for (int i = 0; i < stickerCombo.Items.Count; i++)
+                if (((StickerItem)stickerCombo.Items[i]).Key == key) { idx = i; break; }
+            if (idx < 0)
+                for (int i = 0; i < stickerCombo.Items.Count; i++)
+                    if (((StickerItem)stickerCombo.Items[i]).Key == "40x30") { idx = i; break; }
+            stickerCombo.SelectedIndex = Math.Max(0, idx);
         }
 
         void LoadPapers(string preferName)
@@ -431,8 +491,8 @@ namespace EpsPrint
                 printerSettings.Copies = (short)Math.Min(copiesNum.Value, 999);
                 printerSettings.Collate = collateCb.Checked;
                 var pi = paperCombo.SelectedItem as PaperItem;
-                if (pi != null && !pi.IsCustom) printerSettings.DefaultPageSettings.PaperSize = pi.Size;
-                printerSettings.DefaultPageSettings.Landscape = landscapeRb.Checked;
+                if (!labelMode && pi != null && !pi.IsCustom) printerSettings.DefaultPageSettings.PaperSize = pi.Size;
+                printerSettings.DefaultPageSettings.Landscape = !labelMode && landscapeRb.Checked;
                 dlg.PrinterSettings = printerSettings;
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
@@ -444,15 +504,18 @@ namespace EpsPrint
                     if (printerCombo.Items.Contains(printerSettings.PrinterName))
                         printerCombo.SelectedItem = printerSettings.PrinterName;
                     suppressPrinterChange = false;
-                    ApplyLabelDefaults(printerSettings.PrinterName);
-                    try { LoadPapers(printerSettings.DefaultPageSettings.PaperSize.PaperName); } catch { LoadPapers("A4"); }
-                    try
+                    ApplyPrinterDefaults(printerSettings.PrinterName);
+                    if (!labelMode)
                     {
-                        bool land = printerSettings.DefaultPageSettings.Landscape;
-                        landscapeRb.Checked = land;
-                        portraitRb.Checked = !land;
+                        try { LoadPapers(printerSettings.DefaultPageSettings.PaperSize.PaperName); } catch { LoadPapers("A4"); }
+                        try
+                        {
+                            bool land = printerSettings.DefaultPageSettings.Landscape;
+                            landscapeRb.Checked = land;
+                            portraitRb.Checked = !land;
+                        }
+                        catch { }
                     }
-                    catch { }
                     SetNum(copiesNum, printerSettings.Copies);
                     collateCb.Checked = printerSettings.Collate;
                 }
@@ -478,18 +541,18 @@ namespace EpsPrint
             LoadPapers(settings.Get("paper", "A4"));
             SetNum(customW, settings.GetNum("customW", 100));
             SetNum(customH, settings.GetNum("customH", 150));
+            SetNum(stickerW, settings.GetNum("stickerW", 40));
+            SetNum(stickerH, settings.GetNum("stickerH", 30));
             bool land = settings.Get("orientation", "p") == "l";
             landscapeRb.Checked = land;
             portraitRb.Checked = !land;
-            string sc = settings.Get("scale", "fit");
-            fitRb.Checked = sc == "fit";
-            actualRb.Checked = sc == "actual";
-            customRb.Checked = sc == "custom";
+            bool fit = settings.Get("scale", "actual") == "fit";
+            fitRb.Checked = fit;
+            actualRb.Checked = !fit;
+            customScaleCb.Checked = settings.GetBool("customScale", false);
             SetNum(percentNum, settings.GetNum("percent", 100));
             rotateCb.Checked = settings.GetBool("rotate", false);
-            bool multi = settings.Get("layout", "one") == "multi";
-            multiRb.Checked = multi;
-            oneRb.Checked = !multi;
+            multiCb.Checked = settings.GetBool("multi", false);
             SetNum(marginNum, settings.GetNum("margin", 5));
             SetNum(gapNum, settings.GetNum("gap", 3));
             SetNum(labelGapNum, settings.GetNum("labelGap", 3));
@@ -502,21 +565,29 @@ namespace EpsPrint
             settings.Set("paper", CurrentPaperName());
             settings.Set("customW", customW.Value);
             settings.Set("customH", customH.Value);
+            settings.Set("stickerW", stickerW.Value);
+            settings.Set("stickerH", stickerH.Value);
             settings.Set("orientation", landscapeRb.Checked ? "l" : "p");
-            settings.Set("scale", fitRb.Checked ? "fit" : actualRb.Checked ? "actual" : "custom");
+            settings.Set("scale", fitRb.Checked ? "fit" : "actual");
+            settings.Set("customScale", customScaleCb.Checked);
             settings.Set("percent", percentNum.Value);
             settings.Set("rotate", rotateCb.Checked);
-            settings.Set("layout", multiRb.Checked ? "multi" : "one");
+            settings.Set("multi", multiCb.Checked);
             settings.Set("margin", marginNum.Value);
             settings.Set("gap", gapNum.Value);
-            settings.Set("collate", collateCb.Checked);
             settings.Set("labelGap", labelGapNum.Value);
+            settings.Set("collate", collateCb.Checked);
             string pn = printerCombo.SelectedItem as string;
             if (pn != null)
             {
-                settings.Set("direct|" + pn, directCb.Checked);
+                settings.Set("label|" + pn, labelPrinterCb.Checked);
+                settings.Set("driver|" + pn, useDriverCb.Checked);
                 settings.Set("lang|" + pn, langCombo.SelectedIndex == 1 ? "zpl" : "epl");
                 settings.Set("dpi|" + pn, dpiCombo.SelectedIndex == 1 ? "300" : "203");
+                var si = stickerCombo.SelectedItem as StickerItem;
+                if (si != null) settings.Set("sticker|" + pn, si.Key);
+                settings.Set("offX|" + pn, offXNum.Value);
+                settings.Set("offY|" + pn, offYNum.Value);
             }
             settings.Save();
         }
@@ -590,8 +661,18 @@ namespace EpsPrint
             else if (added.Count == 0)
                 MessageBox.Show(this, "В выбранных файлах не найдено EPS-файлов.", "Нечего печатать", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
+            ApplyProductInfo();
             RebuildPages();
             RenderPending();
+        }
+
+        static EpsItem MakeItem(string path, string name)
+        {
+            var it = new EpsItem { Path = path, Name = name, DisplayName = TextUtil.DisplayName(name) };
+            string gtin;
+            int idx;
+            if (TextUtil.TryParseGtin(name, out gtin, out idx)) { it.Gtin = gtin; it.CodeIndex = idx; }
+            return it;
         }
 
         static bool IsEps(string ext)
@@ -626,7 +707,7 @@ namespace EpsPrint
                 // копируем во временную папку под безопасным именем (только латиница и цифры)
                 string dest = NewTempFile(".eps");
                 File.Copy(f, dest);
-                added.Add(new EpsItem { Path = dest, Name = Path.GetFileName(f), DisplayName = TextUtil.DisplayName(f) });
+                added.Add(MakeItem(dest, Path.GetFileName(f)));
             }
             else if (ext == ".json" || ext == ".txt")
             {
@@ -651,7 +732,7 @@ namespace EpsPrint
                         // Имя на диске генерируем сами — пути из архива никогда не используются
                         string dest = NewTempFile(".eps");
                         entry.ExtractToFile(dest);
-                        added.Add(new EpsItem { Path = dest, Name = entry.Name, DisplayName = TextUtil.DisplayName(entry.Name) });
+                        added.Add(MakeItem(dest, entry.Name));
                     }
                     else if ((ext == ".json" || ext == ".txt") && entry.Length < 1024 * 1024)
                     {
@@ -671,14 +752,92 @@ namespace EpsPrint
 
         void AppendInfo(string title, string text)
         {
-            string t = text.TrimStart();
-            string body = (t.StartsWith("{") || t.StartsWith("[")) ? TextUtil.PrettyJson(t) : text;
-            body = body.Replace("\r\n", "\n").Replace("\n", "\r\n");
-            var sb = new StringBuilder(infoBox.Text);
-            if (sb.Length > 0) sb.Append("\r\n\r\n");
-            sb.Append("── " + title + " ──\r\n");
-            sb.Append(body);
+            var found = ParseProducts(text);
+            if (found != null && found.Count > 0)
+                foreach (var kv in found) products[kv.Key] = kv.Value;
+            else
+                rawInfos.Add(Tuple.Create(title, text));
+        }
+
+        /// <summary>Достаёт из attributes.json («Честный знак») описание товаров по GTIN.</summary>
+        static Dictionary<string, Dictionary<string, object>> ParseProducts(string json)
+        {
+            try
+            {
+                var root = new JavaScriptSerializer().DeserializeObject(json) as Dictionary<string, object>;
+                object g;
+                if (root == null || !root.TryGetValue("gtinProductAttributes", out g)) return null;
+                var gd = g as Dictionary<string, object>;
+                if (gd == null) return null;
+                var res = new Dictionary<string, Dictionary<string, object>>();
+                foreach (var kv in gd)
+                {
+                    var attrs = kv.Value as Dictionary<string, object>;
+                    if (attrs != null) res[kv.Key] = attrs;
+                }
+                return res;
+            }
+            catch { return null; }
+        }
+
+        static string Attr(Dictionary<string, object> a, string key)
+        {
+            object v;
+            if (a == null || !a.TryGetValue(key, out v) || v == null) return null;
+            string s = Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture).Trim();
+            return s.Length == 0 ? null : s;
+        }
+
+        /// <summary>Подписывает файлы названием товара и обновляет панель «О товаре».</summary>
+        void ApplyProductInfo()
+        {
+            var counts = new Dictionary<string, int>();
+            foreach (EpsItem it in fileList.Items)
+            {
+                if (it.Gtin == null) continue;
+                int c;
+                counts.TryGetValue(it.Gtin, out c);
+                counts[it.Gtin] = c + 1;
+                Dictionary<string, object> a;
+                if (products.TryGetValue(it.Gtin, out a))
+                {
+                    string name = Attr(a, "name") ?? Attr(a, "fullName");
+                    if (name != null) it.DisplayName = name + " — №" + (it.CodeIndex + 1);
+                }
+            }
+            fileList.Invalidate();
+
+            var sb = new StringBuilder();
+            foreach (var kv in products)
+            {
+                var a = kv.Value;
+                if (sb.Length > 0) sb.Append("\r\n\r\n");
+                sb.Append(Attr(a, "fullName") ?? Attr(a, "name") ?? "Товар").Append("\r\n");
+                Line(sb, "Бренд", Attr(a, "brand"));
+                Line(sb, "Модель", Attr(a, "model"));
+                Line(sb, "Цвет", Attr(a, "color"));
+                Line(sb, "Вид товара", Attr(a, "productKind"));
+                Line(sb, "GTIN", kv.Key);
+                Line(sb, "ТН ВЭД", Attr(a, "tnVedCode10") ?? Attr(a, "tnVedCode"));
+                Line(sb, "ИНН", Attr(a, "inn"));
+                Line(sb, "Декларация", Attr(a, "conformityDeclaration"));
+                int n;
+                counts.TryGetValue(kv.Key, out n);
+                Line(sb, "Кодов в списке", n.ToString());
+            }
+            foreach (var raw in rawInfos)
+            {
+                string t = raw.Item2.TrimStart();
+                string body = (t.StartsWith("{") || t.StartsWith("[")) ? TextUtil.PrettyJson(t) : raw.Item2;
+                if (sb.Length > 0) sb.Append("\r\n\r\n");
+                sb.Append("── " + raw.Item1 + " ──\r\n").Append(body.Replace("\r\n", "\n").Replace("\n", "\r\n"));
+            }
             infoBox.Text = sb.ToString();
+        }
+
+        static void Line(StringBuilder sb, string label, string value)
+        {
+            if (value != null) sb.Append(label).Append(": ").Append(value).Append("\r\n");
         }
 
         void ClearAll()
@@ -686,6 +845,8 @@ namespace EpsPrint
             foreach (EpsItem it in fileList.Items)
                 if (it.Preview != null) { it.Preview.Dispose(); it.Preview = null; }
             fileList.Items.Clear();
+            products.Clear();
+            rawInfos.Clear();
             infoBox.Clear();
             try
             {
@@ -768,17 +929,28 @@ namespace EpsPrint
         {
             var o = new LayoutOptions();
             float w = 210, h = 297;
-            var pi = paperCombo.SelectedItem as PaperItem;
-            if (pi != null && pi.IsCustom) { w = (float)customW.Value; h = (float)customH.Value; }
-            else if (pi != null) { w = pi.Size.Width * 0.254f; h = pi.Size.Height * 0.254f; }
-            if (landscapeRb.Checked) { float t = w; w = h; h = t; }
+            if (labelMode)
+            {
+                var si = stickerCombo.SelectedItem as StickerItem;
+                if (si == null || si.IsCustom) { w = (float)stickerW.Value; h = (float)stickerH.Value; }
+                else { w = si.W; h = si.H; }
+                o.MarginMm = 0;
+                o.MultiPerSheet = false;
+            }
+            else
+            {
+                var pi = paperCombo.SelectedItem as PaperItem;
+                if (pi != null && pi.IsCustom) { w = (float)customW.Value; h = (float)customH.Value; }
+                else if (pi != null) { w = pi.Size.Width * 0.254f; h = pi.Size.Height * 0.254f; }
+                if (landscapeRb.Checked) { float t = w; w = h; h = t; }
+                o.MarginMm = (float)marginNum.Value;
+                o.MultiPerSheet = multiCb.Checked;
+            }
             o.PaperWmm = w;
             o.PaperHmm = h;
-            o.MarginMm = (float)marginNum.Value;
             o.GapMm = (float)gapNum.Value;
-            o.Scale = fitRb.Checked ? ScaleMode.Fit : actualRb.Checked ? ScaleMode.Actual : ScaleMode.Custom;
+            o.Scale = customScaleCb.Checked ? ScaleMode.Custom : fitRb.Checked ? ScaleMode.Fit : ScaleMode.Actual;
             o.Percent = (float)percentNum.Value;
-            o.MultiPerSheet = multiRb.Checked;
             o.Rotate90 = rotateCb.Checked;
             o.Collate = collateCb.Checked;
             o.Copies = (int)copiesNum.Value;
@@ -797,59 +969,65 @@ namespace EpsPrint
             return list;
         }
 
+        /// <summary>Показывает только то, что нужно для выбранного принтера.</summary>
+        void UpdateModeUi()
+        {
+            bool label = labelMode;
+            sizeHeader.Text = label ? "2. Размер наклейки (в рулоне)" : "2. Бумага";
+            var si = stickerCombo.SelectedItem as StickerItem;
+            var pi = paperCombo.SelectedItem as PaperItem;
+            stickerCombo.Visible = label;
+            stickerSizeRow.Visible = label && si != null && si.IsCustom;
+            paperCombo.Visible = !label;
+            paperSizeRow.Visible = !label && pi != null && pi.IsCustom;
+            fitRb.Text = label ? "Растянуть на всю наклейку" : "Растянуть на весь лист";
+            actualRb.Enabled = fitRb.Enabled = !customScaleCb.Checked;
+            percentNum.Enabled = customScaleCb.Checked;
+            multiCb.Visible = !label;
+            multiCb.Enabled = !fitRb.Checked || customScaleCb.Checked;
+            gapNum.Enabled = multiCb.Checked;
+            paperAdv.Visible = !label;
+            labelAdv.Visible = label;
+            rangeRow.Visible = printWhatCombo.SelectedIndex == 2;
+            if (label)
+                printerKindLabel.Text = useDriverCb.Checked
+                    ? "Принтер для наклеек — печать через драйвер Windows"
+                    : "Принтер для наклеек — печать напрямую, размер наклейки задаётся ниже";
+            else
+                printerKindLabel.Text = "Обычный принтер (листы). Для Zebra и других наклеек: «Ещё настройки».";
+        }
+
         void RebuildPages()
         {
             if (initializing) return;
+            UpdateModeUi();
             var o = ReadOptions();
             var sel = SelectedReadyItems();
-            string warn = null;
-            bool direct = directCb.Checked;
-            if (direct)
-            {
-                pages = PageLayouter.BuildLabels(sel, o.Copies, o.Collate, o.Rotate90);
-                foreach (var pg in pages)
-                    if (pg.PaperWmm > 108) { warn = "Этикетка шире головки принтера (≈104 мм). Попробуйте «Повернуть на 90°»."; break; }
-            }
-            else pages = PageLayouter.Build(sel, o, out warn);
+            string warn;
+            pages = PageLayouter.Build(sel, o, out warn);
+            if (warn != null && labelMode)
+                warn = "Рисунок больше наклейки и обрежется. Выберите «Растянуть на всю наклейку» или другой размер наклейки.";
             layoutWarning = warn;
 
             preview.PaperW = o.PaperWmm;
             preview.PaperH = o.PaperHmm;
-            preview.MarginMm = direct ? 0 : o.MarginMm;
+            preview.MarginMm = o.MarginMm;
             preview.Pages = pages;
             if (preview.PageIndex >= pages.Count) preview.PageIndex = Math.Max(0, pages.Count - 1);
             preview.Invalidate();
             UpdatePageLabel();
 
-            var pi = paperCombo.SelectedItem as PaperItem;
-            bool custom = pi != null && pi.IsCustom;
-            customW.Parent.Visible = custom;
-            customH.Parent.Visible = custom;
-            bool multiPossible = !fitRb.Checked;
-            multiRb.Enabled = multiPossible;
-            gapNum.Enabled = multiPossible && multiRb.Checked;
-
-            foreach (var c in driverOnly) c.Enabled = !direct;
-            labelPanel.Enabled = direct;
-
-            int labels = 0;
-            foreach (var p in pages) labels += p.Items.Count;
             var sb = new StringBuilder();
-            if (direct)
-                sb.AppendFormat("Выбрано файлов: {0}\nЭтикеток с копиями: {1}\nРазмер каждой этикетки берётся из файла.", sel.Count, labels);
-            else
-                sb.AppendFormat("Выбрано файлов: {0}\nВсего рисунков с копиями: {1}\nЛистов бумаги: {2}", sel.Count, labels, pages.Count);
-            if (fitRb.Checked && multiRb.Checked) sb.Append("\n\n«Несколько на листе» работает только с реальным или своим масштабом.");
-            if (pages.Count > 0 && !allPagesRb.Checked)
-            {
-                string rangeErr;
-                var chosen = PagesToPrint(out rangeErr);
-                if (chosen == null) sb.Append("\n\n⚠ " + rangeErr);
-                else sb.AppendFormat("\nБудет напечатано листов: {0}", chosen.Count);
-            }
+            string unit = labelMode ? "Наклеек" : "Листов";
+            string rangeErr;
+            var chosen = PagesToPrint(out rangeErr);
+            sb.AppendFormat("Выбрано файлов: {0}\n", sel.Count);
+            if (chosen == null) sb.Append("⚠ " + rangeErr);
+            else sb.AppendFormat("{0} к печати: {1}", unit, chosen.Count);
+            if (labelMode) sb.AppendFormat("\nНаклейка {0:0.#} × {1:0.#} мм", o.PaperWmm, o.PaperHmm);
             if (layoutWarning != null) sb.Append("\n\n⚠ " + layoutWarning);
             summaryLabel.Text = sb.ToString();
-            summaryLabel.ForeColor = layoutWarning != null ? Color.DarkRed : SystemColors.ControlText;
+            summaryLabel.ForeColor = (layoutWarning != null || chosen == null) ? Color.DarkRed : SystemColors.ControlText;
             printBtn.Enabled = pages.Count > 0 && !printing;
         }
 
@@ -857,22 +1035,20 @@ namespace EpsPrint
         {
             int count = pages.Count;
             int idx = preview.PageIndex;
-            string unit = directCb.Checked ? "Этикетка" : "Лист";
-            pageLabel.Text = count == 0 ? "Нет листов" : string.Format("{0} {1} из {2}", unit, idx + 1, count);
-            currentPageRb.Text = count == 0 ? "Только текущий лист (пробная печать)"
-                                            : "Только текущий лист — №" + (idx + 1) + " (пробная печать)";
+            string unit = labelMode ? "Наклейка" : "Лист";
+            pageLabel.Text = count == 0 ? "Пусто" : string.Format("{0} {1} из {2}", unit, idx + 1, count);
             prevBtn.Enabled = idx > 0;
             nextBtn.Enabled = idx < count - 1;
         }
 
-        /// <summary>Какие листы печатать: все, текущий или диапазон «1-3, 5». null — ошибка в диапазоне.</summary>
+        /// <summary>Что печатать: все, то что в превью, или номера «1-3, 5». null — ошибка в номерах.</summary>
         List<PageLayout> PagesToPrint(out string error)
         {
             error = null;
             if (pages.Count == 0) return new List<PageLayout>();
-            if (currentPageRb.Checked)
+            if (printWhatCombo.SelectedIndex == 1)
                 return new List<PageLayout> { pages[Math.Max(0, Math.Min(preview.PageIndex, pages.Count - 1))] };
-            if (!rangeRb.Checked) return pages;
+            if (printWhatCombo.SelectedIndex != 2) return pages;
 
             string text = System.Text.RegularExpressions.Regex.Replace(rangeBox.Text, @"\s*[-–—]\s*", "-");
             var idx = new SortedSet<int>();
@@ -885,12 +1061,12 @@ namespace EpsPrint
                 else { error = "Не понял «" + part + "». Пример: 1-3, 5"; return null; }
                 if (a < 1 || b > pages.Count || a > b)
                 {
-                    error = "Номера листов должны быть от 1 до " + pages.Count + ".";
+                    error = "Номера должны быть от 1 до " + pages.Count + ".";
                     return null;
                 }
                 for (int i = a; i <= b; i++) idx.Add(i - 1);
             }
-            if (idx.Count == 0) { error = "Укажите номера листов, например: 1-3, 5"; return null; }
+            if (idx.Count == 0) { error = "Впишите номера, например: 1-3, 5"; return null; }
             return idx.Select(i => pages[i]).ToList();
         }
 
@@ -900,6 +1076,7 @@ namespace EpsPrint
             preview.PageIndex = idx;
             preview.Invalidate();
             UpdatePageLabel();
+            if (printWhatCombo.SelectedIndex == 1) RebuildPages();
         }
 
         void JumpToSelected()
@@ -938,6 +1115,11 @@ namespace EpsPrint
 
         PaperSize PrintPaperSize()
         {
+            if (labelMode)
+            {
+                var o = ReadOptions();
+                return new PaperSize("Наклейка", (int)Math.Round(o.PaperWmm / 0.254f), (int)Math.Round(o.PaperHmm / 0.254f));
+            }
             var pi = paperCombo.SelectedItem as PaperItem;
             if (pi == null || pi.IsCustom)
                 return new PaperSize("Custom", (int)Math.Round((float)customW.Value / 0.254f), (int)Math.Round((float)customH.Value / 0.254f));
@@ -968,7 +1150,7 @@ namespace EpsPrint
             if (layoutWarning != null &&
                 MessageBox.Show(this, layoutWarning + "\n\nВсё равно печатать?", "Печать", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                 return;
-            if (directCb.Checked)
+            if (labelMode && !useDriverCb.Checked)
             {
                 PrintLabelsDirect(toPrint);
                 return;
@@ -986,7 +1168,7 @@ namespace EpsPrint
                     doc.PrinterSettings.Copies = 1;        // копии уже разложены по листам
                     doc.PrinterSettings.Collate = false;
                     doc.DefaultPageSettings.PaperSize = PrintPaperSize();
-                    doc.DefaultPageSettings.Landscape = landscapeRb.Checked;
+                    doc.DefaultPageSettings.Landscape = !labelMode && landscapeRb.Checked;
                     doc.DefaultPageSettings.Margins = new Margins(0, 0, 0, 0);
 
                     // Настоящее разрешение принтера с текущими настройками драйвера (у M132 — 600×600)
@@ -1062,38 +1244,57 @@ namespace EpsPrint
             }
         }
 
-        // ───────── Прямая печать на этикеточный принтер ─────────
+        // ───────── Прямая печать на принтер для наклеек ─────────
 
         LabelLanguage CurrentLanguage()
         {
             return langCombo.SelectedIndex == 1 ? LabelLanguage.Zpl : LabelLanguage.Epl;
         }
 
+        static string Signature(PageLayout page)
+        {
+            var sb = new StringBuilder();
+            foreach (var p in page.Items)
+                sb.Append(p.Item.Path).Append('|').Append(p.Rect.ToString()).Append('|').Append(p.Rotated).Append(';');
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Каждая наклейка собирается в картинку ровно размером с наклейку (в точках головки),
+        /// рисунок ставится на неё так же, как в превью. Принтер получает размер наклейки и зазор.
+        /// </summary>
         async void PrintLabelsDirect(List<PageLayout> toPrint)
         {
             printing = true;
             printBtn.Enabled = false;
             try
             {
+                var o = ReadOptions();
                 var lang = CurrentLanguage();
                 float dpi = dpiCombo.SelectedIndex == 1 ? 300f : 203.2f;
-                int gapDots = (int)Math.Round((float)labelGapNum.Value / 25.4f * dpi);
+                double dpmm = dpi / 25.4;
+                int wDots = (int)Math.Round(o.PaperWmm * dpmm);
+                int hDots = (int)Math.Round(o.PaperHmm * dpmm);
+                int maxDots = dpi > 250 ? 1248 : 832;   // ширина головки 4"
+                if (wDots > maxDots)
+                    throw new Exception("Наклейка шире печатающей головки (" + Math.Round(maxDots / dpmm) + " мм). Проверьте размер наклейки.");
+                int gapDots = (int)Math.Round((double)labelGapNum.Value * dpmm);
+                double offX = (double)offXNum.Value, offY = (double)offYNum.Value;
                 string tmp = tempDir;
                 string printer = printerSettings.PrinterName;
 
-                // подряд идущие одинаковые этикетки печатаем одной командой с количеством копий
-                var runs = new List<Tuple<Placement, int>>();
+                // подряд идущие одинаковые наклейки — одной командой с количеством
+                var runs = new List<Tuple<PageLayout, int>>();
                 foreach (var pg in toPrint)
                 {
-                    var p = pg.Items[0];
                     int last = runs.Count - 1;
-                    if (last >= 0 && runs[last].Item1.Item == p.Item && runs[last].Item1.Rotated == p.Rotated)
+                    if (last >= 0 && Signature(runs[last].Item1) == Signature(pg))
                         runs[last] = Tuple.Create(runs[last].Item1, runs[last].Item2 + 1);
                     else
-                        runs.Add(Tuple.Create(p, 1));
+                        runs.Add(Tuple.Create(pg, 1));
                 }
 
-                SetStatus("Подготовка этикеток…");
+                SetStatus("Подготовка наклеек…");
                 byte[] data = await Task.Run(() =>
                 {
                     var cache = new Dictionary<string, MonoImage>();
@@ -1101,24 +1302,30 @@ namespace EpsPrint
                     {
                         foreach (var run in runs)
                         {
-                            string key = run.Item1.Item.Path + "|" + run.Item1.Rotated;
-                            MonoImage img;
-                            if (!cache.TryGetValue(key, out img))
+                            var canvas = MonoImage.Blank(wDots, hDots);
+                            foreach (var p in run.Item1.Items)
                             {
-                                img = LabelPrinter.RenderMono(run.Item1.Item.Path, dpi, tmp);
-                                if (run.Item1.Rotated) img = img.Rotate90();
-                                cache[key] = img;
+                                float s = ScaleOf(p);
+                                string key = p.Item.Path + "|" + s.ToString("0.#####", System.Globalization.CultureInfo.InvariantCulture) + "|" + p.Rotated;
+                                MonoImage img;
+                                if (!cache.TryGetValue(key, out img))
+                                {
+                                    img = LabelPrinter.RenderMono(p.Item.Path, dpi * s, tmp);
+                                    if (p.Rotated) img = img.Rotate90();
+                                    cache[key] = img;
+                                }
+                                canvas.Blit(img, (int)Math.Round((p.Rect.X + offX) * dpmm), (int)Math.Round((p.Rect.Y + offY) * dpmm));
                             }
-                            if (lang == LabelLanguage.Epl) LabelPrinter.AppendEpl(ms, img, run.Item2, gapDots);
-                            else LabelPrinter.AppendZpl(ms, img, run.Item2);
+                            if (lang == LabelLanguage.Epl) LabelPrinter.AppendEpl(ms, canvas, run.Item2, gapDots);
+                            else LabelPrinter.AppendZpl(ms, canvas, run.Item2);
                         }
                         return ms.ToArray();
                     }
                 });
 
                 SetStatus("Отправка на принтер…");
-                await Task.Run(() => RawPrinter.Send(printer, "EPS этикетки (" + toPrint.Count + ")", data));
-                SetStatus("Отправлено этикеток: " + toPrint.Count);
+                await Task.Run(() => RawPrinter.Send(printer, "EPS наклейки (" + toPrint.Count + ")", data));
+                SetStatus("Отправлено наклеек: " + toPrint.Count);
                 SaveSettings();
             }
             catch (Exception ex)
@@ -1137,7 +1344,7 @@ namespace EpsPrint
         {
             string printer = printerSettings.PrinterName;
             if (MessageBox.Show(this,
-                    "Принтер «" + printer + "» заново измерит этикетки и зазоры и протянет несколько пустых этикеток.\n\n" +
+                    "Принтер «" + printer + "» заново измерит наклейки и зазоры и протянет несколько пустых наклеек.\n\n" +
                     "Делайте это после замены рулона или если печать начала съезжать.\nПродолжить?",
                     "Калибровка", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
             try

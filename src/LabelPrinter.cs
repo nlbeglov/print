@@ -19,6 +19,29 @@ namespace EpsPrint
             return (Bits[y * Stride + (x >> 3)] & (0x80 >> (x & 7))) != 0;
         }
 
+        public static MonoImage Blank(int w, int h)
+        {
+            var r = new MonoImage { Width = w, Height = h, Stride = (w + 7) / 8 };
+            r.Bits = new byte[r.Stride * h];
+            return r;
+        }
+
+        /// <summary>Накладывает чёрные точки src в позицию (ox, oy); всё, что за краем, обрезается.</summary>
+        public void Blit(MonoImage src, int ox, int oy)
+        {
+            for (int y = 0; y < src.Height; y++)
+            {
+                int ty = oy + y;
+                if (ty < 0 || ty >= Height) continue;
+                for (int x = 0; x < src.Width; x++)
+                {
+                    int tx = ox + x;
+                    if (tx < 0 || tx >= Width || !src.Get(x, y)) continue;
+                    Bits[ty * Stride + (tx >> 3)] |= (byte)(0x80 >> (tx & 7));
+                }
+            }
+        }
+
         /// <summary>Поворот на 90° по часовой (как в превью).</summary>
         public MonoImage Rotate90()
         {
