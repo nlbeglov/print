@@ -1350,44 +1350,56 @@ namespace EpsPrint
                     calibrate = answer == DialogResult.Yes;
                 }
 
+                // Каждая наклейка — отдельное задание, точно такое же, как при печати одной наклейки:
+                // несколько наклеек в одном задании TLP 2844 печатает со сдвигом и лишней пустой.
                 SetStatus("Подготовка наклеек…");
-                byte[] data = await Task.Run(() =>
+                var jobs = await Task.Run(() =>
                 {
+                    var list = new List<byte[]>();
+                    if (calibrate) list.Add(LabelPrinter.CalibrateCommand(lang));
                     var cache = new Dictionary<string, MonoImage>();
-                    using (var ms = new MemoryStream())
+                    foreach (var run in runs)
                     {
-                        if (calibrate)
+                        var canvas = MonoImage.Blank(wDots, hDots);
+                        foreach (var p in run.Item1.Items)
                         {
-                            var cal = LabelPrinter.CalibrateCommand(lang);
-                            ms.Write(cal, 0, cal.Length);
-                        }
-                        if (lang == LabelLanguage.Epl) LabelPrinter.AppendEplSetup(ms, maxDots, hDots, gapDots);
-                        foreach (var run in runs)
-                        {
-                            var canvas = MonoImage.Blank(wDots, hDots);
-                            foreach (var p in run.Item1.Items)
+                            float s = ScaleOf(p);
+                            string key = p.Item.Path + "|" + s.ToString("0.#####", System.Globalization.CultureInfo.InvariantCulture) + "|" + p.Rotated;
+                            MonoImage img;
+                            if (!cache.TryGetValue(key, out img))
                             {
-                                float s = ScaleOf(p);
-                                string key = p.Item.Path + "|" + s.ToString("0.#####", System.Globalization.CultureInfo.InvariantCulture) + "|" + p.Rotated;
-                                MonoImage img;
-                                if (!cache.TryGetValue(key, out img))
-                                {
-                                    img = LabelPrinter.RenderMono(p.Item.Path, dpi * s, tmp);
-                                    if (p.Rotated) img = img.Rotate90();
-                                    cache[key] = img;
-                                }
-                                canvas.Blit(img, (int)Math.Round((p.Rect.X + offX) * dpmm), (int)Math.Round((p.Rect.Y + offY) * dpmm));
+                                img = LabelPrinter.RenderMono(p.Item.Path, dpi * s, tmp);
+                                if (p.Rotated) img = img.Rotate90();
+                                cache[key] = img;
                             }
-                            if (lang == LabelLanguage.Epl) LabelPrinter.AppendEpl(ms, canvas, run.Item2, maxDots);
-                            else LabelPrinter.AppendZpl(ms, canvas, run.Item2, maxDots);
+                            canvas.Blit(img, (int)Math.Round((p.Rect.X + offX) * dpmm), (int)Math.Round((p.Rect.Y + offY) * dpmm));
                         }
-                        return ms.ToArray();
+                        byte[] one;
+                        using (var ms = new MemoryStream())
+                        {
+                            if (lang == LabelLanguage.Epl)
+                            {
+                                LabelPrinter.AppendEplSetup(ms, maxDots, hDots, gapDots);
+                                LabelPrinter.AppendEpl(ms, canvas, 1, maxDots);
+                            }
+                            else LabelPrinter.AppendZpl(ms, canvas, 1, maxDots);
+                            one = ms.ToArray();
+                        }
+                        for (int c = 0; c < run.Item2; c++) list.Add(one);
                     }
+                    return list;
                 });
 
-                SetStatus("Отправка на принтер…");
-                await Task.Run(() => RawPrinter.Send(printer, "EPS наклейки (" + toPrint.Count + ")", data));
-                SetStatus("Отправлено наклеек: " + toPrint.Count);
+                int total = jobs.Count - (calibrate ? 1 : 0);
+                for (int i = 0; i < jobs.Count; i++)
+                {
+                    int n = i + 1 - (calibrate ? 1 : 0);
+                    SetStatus(n <= 0 ? "Калибровка…" : string.Format("Отправка на принтер: {0} из {1}", n, total));
+                    byte[] job = jobs[i];
+                    string docName = n <= 0 ? "Калибровка" : "EPS наклейка " + n + " из " + total;
+                    await Task.Run(() => RawPrinter.Send(printer, docName, job));
+                }
+                SetStatus("Отправлено наклеек: " + total);
                 settings.Set("lastSize|" + printer, sizeKey);
                 SaveSettings();
             }
