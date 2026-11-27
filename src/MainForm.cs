@@ -44,6 +44,11 @@ namespace EpsPrint
         CheckBox rotateCb, collateCb;
         RadioButton allPagesRb, currentPageRb, rangeRb;
         TextBox rangeBox;
+        CheckBox directCb;
+        ComboBox langCombo, dpiCombo;
+        NumericUpDown labelGapNum;
+        Control labelPanel;
+        List<Control> driverOnly = new List<Control>();
         Button printBtn;
         Label summaryLabel;
         ToolStripStatusLabel statusLabel;
@@ -162,6 +167,24 @@ namespace EpsPrint
             propsBtn.Click += (s, e) => ShowPrinterDialog();
             right.Controls.Add(propsBtn);
 
+            right.Controls.Add(Header("Этикеточный принтер (Zebra)"));
+            directCb = new CheckBox { Text = "Прямая печать на этикетки\n(размер этикетки = размер файла)", AutoSize = true };
+            directCb.CheckedChanged += (s, e) => RebuildPages();
+            right.Controls.Add(directCb);
+            langCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 135 };
+            langCombo.Items.AddRange(new object[] { "EPL (TLP 2844)", "ZPL (модели -Z)" });
+            langCombo.SelectedIndex = 0;
+            dpiCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 135 };
+            dpiCombo.Items.AddRange(new object[] { "203 dpi", "300 dpi" });
+            dpiCombo.SelectedIndex = 0;
+            labelGapNum = Num(0, 20, 1, 3);
+            var calibrateBtn = new Button { Text = "Калибровать (если печать сбилась)", Width = W, Height = 28 };
+            calibrateBtn.Click += (s, e) => Calibrate();
+            labelPanel = Group(FlowDirection.TopDown,
+                Row("Язык принтера:", langCombo), Row("Разрешение:", dpiCombo),
+                Row("Зазор между, мм:", labelGapNum), calibrateBtn);
+            right.Controls.Add(labelPanel);
+
             right.Controls.Add(Header("Бумага"));
             paperCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = W, DropDownHeight = 400 };
             paperCombo.SelectedIndexChanged += (s, e) => RebuildPages();
@@ -244,6 +267,11 @@ namespace EpsPrint
 
             Controls.Add(root);
             Controls.Add(status);
+
+            // эти настройки не нужны в режиме прямой печати на этикетки
+            driverOnly.AddRange(new Control[] {
+                paperCombo, customW.Parent, customH.Parent, portraitRb.Parent,
+                fitRb, actualRb, customRb.Parent, oneRb.Parent, marginNum.Parent, gapNum.Parent });
         }
 
         Label Header(string text)
@@ -337,7 +365,24 @@ namespace EpsPrint
             printerSettings = new PrinterSettings();
             printerSettings.PrinterName = name;
             LoadPapers(prevPaper ?? settings.Get("paper", "A4"));
+            ApplyLabelDefaults(name);
             RebuildPages();
+        }
+
+        /// <summary>Для Zebra прямая печать включается сама; выбор пользователя запоминается для каждого принтера.</summary>
+        void ApplyLabelDefaults(string name)
+        {
+            bool wasInit = initializing;
+            initializing = true;
+            try
+            {
+                directCb.Checked = settings.GetBool("direct|" + name, LabelPrinter.LooksLikeLabelPrinter(name));
+                string lang = settings.Get("lang|" + name, null);
+                bool zpl = lang != null ? lang == "zpl" : LabelPrinter.GuessLanguage(name) == LabelLanguage.Zpl;
+                langCombo.SelectedIndex = zpl ? 1 : 0;
+                dpiCombo.SelectedIndex = settings.Get("dpi|" + name, "203") == "300" ? 1 : 0;
+            }
+            finally { initializing = wasInit; }
         }
 
         void LoadPapers(string preferName)
@@ -399,6 +444,7 @@ namespace EpsPrint
                     if (printerCombo.Items.Contains(printerSettings.PrinterName))
                         printerCombo.SelectedItem = printerSettings.PrinterName;
                     suppressPrinterChange = false;
+                    ApplyLabelDefaults(printerSettings.PrinterName);
                     try { LoadPapers(printerSettings.DefaultPageSettings.PaperSize.PaperName); } catch { LoadPapers("A4"); }
                     try
                     {
@@ -446,6 +492,7 @@ namespace EpsPrint
             oneRb.Checked = !multi;
             SetNum(marginNum, settings.GetNum("margin", 5));
             SetNum(gapNum, settings.GetNum("gap", 3));
+            SetNum(labelGapNum, settings.GetNum("labelGap", 3));
             collateCb.Checked = settings.GetBool("collate", true);
         }
 
@@ -463,6 +510,14 @@ namespace EpsPrint
             settings.Set("margin", marginNum.Value);
             settings.Set("gap", gapNum.Value);
             settings.Set("collate", collateCb.Checked);
+            settings.Set("labelGap", labelGapNum.Value);
+            string pn = printerCombo.SelectedItem as string;
+            if (pn != null)
+            {
+                settings.Set("direct|" + pn, directCb.Checked);
+                settings.Set("lang|" + pn, langCombo.SelectedIndex == 1 ? "zpl" : "epl");
+                settings.Set("dpi|" + pn, dpiCombo.SelectedIndex == 1 ? "300" : "203");
+            }
             settings.Save();
         }
 
@@ -747,13 +802,20 @@ namespace EpsPrint
             if (initializing) return;
             var o = ReadOptions();
             var sel = SelectedReadyItems();
-            string warn;
-            pages = PageLayouter.Build(sel, o, out warn);
+            string warn = null;
+            bool direct = directCb.Checked;
+            if (direct)
+            {
+                pages = PageLayouter.BuildLabels(sel, o.Copies, o.Collate, o.Rotate90);
+                foreach (var pg in pages)
+                    if (pg.PaperWmm > 108) { warn = "Этикетка шире головки принтера (≈104 мм). Попробуйте «Повернуть на 90°»."; break; }
+            }
+            else pages = PageLayouter.Build(sel, o, out warn);
             layoutWarning = warn;
 
             preview.PaperW = o.PaperWmm;
             preview.PaperH = o.PaperHmm;
-            preview.MarginMm = o.MarginMm;
+            preview.MarginMm = direct ? 0 : o.MarginMm;
             preview.Pages = pages;
             if (preview.PageIndex >= pages.Count) preview.PageIndex = Math.Max(0, pages.Count - 1);
             preview.Invalidate();
@@ -767,10 +829,16 @@ namespace EpsPrint
             multiRb.Enabled = multiPossible;
             gapNum.Enabled = multiPossible && multiRb.Checked;
 
+            foreach (var c in driverOnly) c.Enabled = !direct;
+            labelPanel.Enabled = direct;
+
             int labels = 0;
             foreach (var p in pages) labels += p.Items.Count;
             var sb = new StringBuilder();
-            sb.AppendFormat("Выбрано файлов: {0}\nВсего рисунков с копиями: {1}\nЛистов бумаги: {2}", sel.Count, labels, pages.Count);
+            if (direct)
+                sb.AppendFormat("Выбрано файлов: {0}\nЭтикеток с копиями: {1}\nРазмер каждой этикетки берётся из файла.", sel.Count, labels);
+            else
+                sb.AppendFormat("Выбрано файлов: {0}\nВсего рисунков с копиями: {1}\nЛистов бумаги: {2}", sel.Count, labels, pages.Count);
             if (fitRb.Checked && multiRb.Checked) sb.Append("\n\n«Несколько на листе» работает только с реальным или своим масштабом.");
             if (pages.Count > 0 && !allPagesRb.Checked)
             {
@@ -789,7 +857,8 @@ namespace EpsPrint
         {
             int count = pages.Count;
             int idx = preview.PageIndex;
-            pageLabel.Text = count == 0 ? "Нет листов" : string.Format("Лист {0} из {1}", idx + 1, count);
+            string unit = directCb.Checked ? "Этикетка" : "Лист";
+            pageLabel.Text = count == 0 ? "Нет листов" : string.Format("{0} {1} из {2}", unit, idx + 1, count);
             currentPageRb.Text = count == 0 ? "Только текущий лист (пробная печать)"
                                             : "Только текущий лист — №" + (idx + 1) + " (пробная печать)";
             prevBtn.Enabled = idx > 0;
@@ -899,6 +968,11 @@ namespace EpsPrint
             if (layoutWarning != null &&
                 MessageBox.Show(this, layoutWarning + "\n\nВсё равно печатать?", "Печать", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                 return;
+            if (directCb.Checked)
+            {
+                PrintLabelsDirect(toPrint);
+                return;
+            }
 
             printing = true;
             printBtn.Enabled = false;
@@ -985,6 +1059,95 @@ namespace EpsPrint
                 foreach (var b in bitmaps.Values) b.Dispose();
                 printing = false;
                 RebuildPages();
+            }
+        }
+
+        // ───────── Прямая печать на этикеточный принтер ─────────
+
+        LabelLanguage CurrentLanguage()
+        {
+            return langCombo.SelectedIndex == 1 ? LabelLanguage.Zpl : LabelLanguage.Epl;
+        }
+
+        async void PrintLabelsDirect(List<PageLayout> toPrint)
+        {
+            printing = true;
+            printBtn.Enabled = false;
+            try
+            {
+                var lang = CurrentLanguage();
+                float dpi = dpiCombo.SelectedIndex == 1 ? 300f : 203.2f;
+                int gapDots = (int)Math.Round((float)labelGapNum.Value / 25.4f * dpi);
+                string tmp = tempDir;
+                string printer = printerSettings.PrinterName;
+
+                // подряд идущие одинаковые этикетки печатаем одной командой с количеством копий
+                var runs = new List<Tuple<Placement, int>>();
+                foreach (var pg in toPrint)
+                {
+                    var p = pg.Items[0];
+                    int last = runs.Count - 1;
+                    if (last >= 0 && runs[last].Item1.Item == p.Item && runs[last].Item1.Rotated == p.Rotated)
+                        runs[last] = Tuple.Create(runs[last].Item1, runs[last].Item2 + 1);
+                    else
+                        runs.Add(Tuple.Create(p, 1));
+                }
+
+                SetStatus("Подготовка этикеток…");
+                byte[] data = await Task.Run(() =>
+                {
+                    var cache = new Dictionary<string, MonoImage>();
+                    using (var ms = new MemoryStream())
+                    {
+                        foreach (var run in runs)
+                        {
+                            string key = run.Item1.Item.Path + "|" + run.Item1.Rotated;
+                            MonoImage img;
+                            if (!cache.TryGetValue(key, out img))
+                            {
+                                img = LabelPrinter.RenderMono(run.Item1.Item.Path, dpi, tmp);
+                                if (run.Item1.Rotated) img = img.Rotate90();
+                                cache[key] = img;
+                            }
+                            if (lang == LabelLanguage.Epl) LabelPrinter.AppendEpl(ms, img, run.Item2, gapDots);
+                            else LabelPrinter.AppendZpl(ms, img, run.Item2);
+                        }
+                        return ms.ToArray();
+                    }
+                });
+
+                SetStatus("Отправка на принтер…");
+                await Task.Run(() => RawPrinter.Send(printer, "EPS этикетки (" + toPrint.Count + ")", data));
+                SetStatus("Отправлено этикеток: " + toPrint.Count);
+                SaveSettings();
+            }
+            catch (Exception ex)
+            {
+                SetStatus("Ошибка печати");
+                MessageBox.Show(this, ex.Message, "Ошибка печати", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                printing = false;
+                RebuildPages();
+            }
+        }
+
+        void Calibrate()
+        {
+            string printer = printerSettings.PrinterName;
+            if (MessageBox.Show(this,
+                    "Принтер «" + printer + "» заново измерит этикетки и зазоры и протянет несколько пустых этикеток.\n\n" +
+                    "Делайте это после замены рулона или если печать начала съезжать.\nПродолжить?",
+                    "Калибровка", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+            try
+            {
+                RawPrinter.Send(printer, "Калибровка", LabelPrinter.CalibrateCommand(CurrentLanguage()));
+                SetStatus("Калибровка отправлена на принтер");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Калибровка", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 

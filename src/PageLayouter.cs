@@ -90,6 +90,26 @@ namespace EpsPrint
             return pages;
         }
 
+        /// <summary>Этикеточный режим: каждая этикетка — отдельный «лист» ровно по размеру рисунка.</summary>
+        public static List<PageLayout> BuildLabels(List<EpsItem> items, int copies, bool collate, bool rotate)
+        {
+            var pages = new List<PageLayout>();
+            copies = Math.Max(1, copies);
+            var seq = new List<EpsItem>();
+            if (collate) { for (int c = 0; c < copies; c++) seq.AddRange(items); }
+            else foreach (var it in items) for (int c = 0; c < copies; c++) seq.Add(it);
+            foreach (var it in seq)
+            {
+                float w = rotate ? it.HeightMm : it.WidthMm;
+                float h = rotate ? it.WidthMm : it.HeightMm;
+                if (w <= 0 || h <= 0) continue;
+                var pg = new PageLayout { PaperWmm = w, PaperHmm = h };
+                pg.Items.Add(new Placement { Item = it, Rect = new RectangleF(0, 0, w, h), Rotated = rotate });
+                pages.Add(pg);
+            }
+            return pages;
+        }
+
         /// <summary>Рисует картинку в прямоугольник размещения (с поворотом на 90° по часовой, если нужно).</summary>
         public static void DrawPlacement(Graphics g, Bitmap bmp, Placement p)
         {

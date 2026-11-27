@@ -25,12 +25,16 @@ namespace EpsPrint
         {
             base.OnPaint(e);
             var g = e.Graphics;
-            if (PaperW <= 0 || PaperH <= 0) return;
+            PageLayout page = (Pages != null && Pages.Count > 0) ? Pages[Math.Max(0, Math.Min(PageIndex, Pages.Count - 1))] : null;
+            float paperW = PaperW, paperH = PaperH;
+            if (page != null && page.PaperWmm > 0 && page.PaperHmm > 0) { paperW = page.PaperWmm; paperH = page.PaperHmm; }
+            if (paperW <= 0 || paperH <= 0) return;
 
             const float pad = 24;
-            float zoom = Math.Min((Width - 2 * pad) / PaperW, (Height - 2 * pad) / PaperH);
+            // маленькую этикетку не раздуваем на весь экран больше, чем в 12 раз
+            float zoom = Math.Min(Math.Min((Width - 2 * pad) / paperW, (Height - 2 * pad) / paperH), 12f * 96f / 25.4f);
             if (zoom <= 0) return;
-            float pw = PaperW * zoom, ph = PaperH * zoom;
+            float pw = paperW * zoom, ph = paperH * zoom;
             float ox = (Width - pw) / 2, oy = (Height - ph) / 2;
 
             using (var shadow = new SolidBrush(Color.FromArgb(60, 0, 0, 0)))
@@ -48,20 +52,19 @@ namespace EpsPrint
                 }
             }
 
-            if (Pages == null || Pages.Count == 0)
+            if (page == null)
             {
                 using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                     g.DrawString(EmptyText, Font, Brushes.Gray, new RectangleF(ox, oy, pw, ph), sf);
                 return;
             }
 
-            var page = Pages[Math.Max(0, Math.Min(PageIndex, Pages.Count - 1))];
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             var state = g.Save();
             g.TranslateTransform(ox, oy);
             g.ScaleTransform(zoom, zoom);
-            g.SetClip(new RectangleF(0, 0, PaperW, PaperH));
+            g.SetClip(new RectangleF(0, 0, paperW, paperH));
             foreach (var p in page.Items)
             {
                 if (p.Item.Preview != null)

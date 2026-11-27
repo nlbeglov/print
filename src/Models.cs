@@ -35,6 +35,7 @@ namespace EpsPrint
     class PageLayout
     {
         public List<Placement> Items = new List<Placement>();
+        public float PaperWmm, PaperHmm;   // свой размер листа (этикетки); 0 — общий размер бумаги
     }
 
     enum ScaleMode { Fit, Actual, Custom }
