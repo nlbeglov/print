@@ -24,11 +24,6 @@ permissions:
 
 concurrency: release
 
-env:
-  # Ghostscript: закреплённая версия и контрольная сумма (защита от подмены)
-  GS_URL: https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10080/gs10080w64.exe
-  GS_SHA256: 52a91b8bf09298788d7a57b9206127026c23eacd75405f0a131e26dc381dce50
-
 jobs:
   release:
     runs-on: windows-latest
@@ -65,32 +60,9 @@ jobs:
         shell: cmd
         run: call build.bat
 
-      - name: Bundle Ghostscript
+      - name: Bundle and test Ghostscript
         shell: pwsh
-        run: |
-          Invoke-WebRequest $env:GS_URL -OutFile gs-installer.exe
-          $h = (Get-FileHash gs-installer.exe -Algorithm SHA256).Hash.ToLower()
-          if ($h -ne $env:GS_SHA256) { throw "Контрольная сумма Ghostscript не совпала: $h" }
-          7z x -y -ogs_ext gs-installer.exe | Out-Null
-          $bin = "dist\pkg\gs\bin"
-          New-Item -ItemType Directory -Force $bin | Out-Null
-          Copy-Item gs_ext\bin\gswin64c.exe, gs_ext\bin\gsdll64.dll $bin
-          Copy-Item gs_ext\doc\COPYING dist\pkg\gs\LICENSE-Ghostscript-AGPL.txt
-          # Рантайм Visual C++ рядом с Ghostscript (чтобы у друзей ничего не доустанавливать)
-          foreach ($d in 'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll') {
-            Copy-Item "$env:WINDIR\System32\$d" $bin
-          }
-
-      - name: Smoke test Ghostscript
-        shell: pwsh
-        run: |
-          & dist\pkg\gs\bin\gswin64c.exe -dSAFER -dBATCH -dNOPAUSE -dQUIET -dEPSCrop -sDEVICE=png16m -r600 -sOutputFile=smoke.png tests\sample.eps
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path smoke.png)) { throw "Встроенный Ghostscript не смог отрисовать тестовый EPS" }
-          Add-Type -AssemblyName System.Drawing
-          $img = [System.Drawing.Image]::FromFile((Resolve-Path smoke.png))
-          "smoke.png: $($img.Width) x $($img.Height)"
-          if ($img.Width -ne 1370 -or $img.Height -ne 945) { throw "Неожиданный размер картинки" }
-          $img.Dispose()
+        run: ./ci/bundle-gs.ps1
 
       - name: Package
         shell: pwsh

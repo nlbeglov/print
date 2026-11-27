@@ -17,6 +17,9 @@ jobs:
       - name: Build
         shell: cmd
         run: call build.bat
+      - name: Bundle and test Ghostscript
+        shell: pwsh
+        run: ./ci/bundle-gs.ps1
       - name: Build setup (empty payload)
         shell: pwsh
         run: |
