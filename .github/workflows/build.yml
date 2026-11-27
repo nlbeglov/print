@@ -1,0 +1,30 @@
+# Проверка, что всё компилируется, при каждом push (без релиза и без секретов)
+name: Build check
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        shell: cmd
+        run: call build.bat
+      - name: Build setup (empty payload)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          New-Item -ItemType Directory -Force tmp_payload | Out-Null
+          Set-Content tmp_payload\README.txt "test"
+          [System.IO.Compression.ZipFile]::CreateFromDirectory((Resolve-Path tmp_payload), "$PWD\payload.zip")
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /codepage:65001 `
+            /out:dist\EpsPrint-Setup.exe /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll `
+            /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll /resource:payload.zip,payload.zip setup\Setup.cs shared\Version.cs
+          if ($LASTEXITCODE -ne 0) { throw "setup build failed" }

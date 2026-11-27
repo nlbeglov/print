@@ -1,0 +1,123 @@
+# Выпуск новой версии — запускается сам при push тега vX.Y.Z (текст аннотации тега = «что нового»),
+# или вручную: вкладка Actions → Release → Run workflow → ввести версию.
+# Собирает всё на Windows, встраивает Ghostscript и создаёт релиз с:
+#   EpsPrint-Setup.exe   — установщик для друзей (один файл, всё внутри)
+#   EpsPrint-update.zip  — пакет для кнопки «Проверить обновления»
+# Секреты не нужны: репозиторий публичный.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Новая версия, например 1.0.1 (должна быть больше предыдущей)"
+        required: true
+      notes:
+        description: "Что нового (друзья увидят это при обновлении)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency: release
+
+env:
+  # Ghostscript: закреплённая версия и контрольная сумма (защита от подмены)
+  GS_URL: https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10080/gs10080w64.exe
+  GS_SHA256: 52a91b8bf09298788d7a57b9206127026c23eacd75405f0a131e26dc381dce50
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check version
+        shell: pwsh
+        env:
+          RAW_VERSION: ${{ inputs.version || github.ref_name }}
+          INPUT_NOTES: ${{ inputs.notes }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $env:VERSION = $env:RAW_VERSION.TrimStart('v')
+          "VERSION=$env:VERSION" >> $env:GITHUB_ENV
+          # «Что нового»: из формы запуска или из аннотации тега
+          $notes = $env:INPUT_NOTES
+          if (-not $notes -and $env:GITHUB_REF_TYPE -eq 'tag') { git fetch --force --tags -q; $notes = (git tag -l --format='%(contents)' $env:GITHUB_REF_NAME) -join "`n" }
+          if (-not $notes) { $notes = "Версия $env:VERSION" }
+          Set-Content -Path release-notes.md -Value $notes -Encoding utf8
+          if ($env:VERSION -notmatch '^\d+\.\d+\.\d+$') { throw "Версия должна быть вида 1.2.3" }
+          $tags = gh release list --limit 200 --json tagName --jq '.[].tagName'
+          foreach ($t in $tags) {
+            $v = $t.TrimStart('v')
+            if ($v -match '^\d+\.\d+\.\d+$' -and [version]$v -ge [version]$env:VERSION) {
+              throw "Версия $env:VERSION должна быть больше уже выпущенной $t"
+            }
+          }
+          Set-Content -Path VERSION -Value $env:VERSION -NoNewline
+
+      - name: Build
+        shell: cmd
+        run: call build.bat
+
+      - name: Bundle Ghostscript
+        shell: pwsh
+        run: |
+          Invoke-WebRequest $env:GS_URL -OutFile gs-installer.exe
+          $h = (Get-FileHash gs-installer.exe -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne $env:GS_SHA256) { throw "Контрольная сумма Ghostscript не совпала: $h" }
+          7z x -y -ogs_ext gs-installer.exe | Out-Null
+          $bin = "dist\pkg\gs\bin"
+          New-Item -ItemType Directory -Force $bin | Out-Null
+          Copy-Item gs_ext\bin\gswin64c.exe, gs_ext\bin\gsdll64.dll $bin
+          Copy-Item gs_ext\doc\COPYING dist\pkg\gs\LICENSE-Ghostscript-AGPL.txt
+          # Рантайм Visual C++ рядом с Ghostscript (чтобы у друзей ничего не доустанавливать)
+          foreach ($d in 'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll') {
+            Copy-Item "$env:WINDIR\System32\$d" $bin
+          }
+
+      - name: Smoke test Ghostscript
+        shell: pwsh
+        run: |
+          & dist\pkg\gs\bin\gswin64c.exe -dSAFER -dBATCH -dNOPAUSE -dQUIET -dEPSCrop -sDEVICE=png16m -r600 -sOutputFile=smoke.png tests\sample.eps
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path smoke.png)) { throw "Встроенный Ghostscript не смог отрисовать тестовый EPS" }
+          Add-Type -AssemblyName System.Drawing
+          $img = [System.Drawing.Image]::FromFile((Resolve-Path smoke.png))
+          "smoke.png: $($img.Width) x $($img.Height)"
+          if ($img.Width -ne 1370 -or $img.Height -ne 945) { throw "Неожиданный размер картинки" }
+          $img.Dispose()
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $pkg = "dist\pkg"
+          Copy-Item dist\EpsPrint.exe, dist\Updater.exe, dist\README.txt, dist\firewall.bat $pkg
+
+          # Пакет обновления: только EpsPrint.exe, Updater.exe, README.txt (без папок)
+          New-Item -ItemType Directory -Force dist\upd | Out-Null
+          Copy-Item dist\EpsPrint.exe, dist\Updater.exe, dist\README.txt dist\upd
+          [System.IO.Compression.ZipFile]::CreateFromDirectory((Resolve-Path dist\upd), "$PWD\dist\EpsPrint-update.zip")
+
+          # Установщик: payload.zip внутри EpsPrint-Setup.exe
+          [System.IO.Compression.ZipFile]::CreateFromDirectory((Resolve-Path $pkg), "$PWD\dist\payload.zip")
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /optimize+ /codepage:65001 /target:winexe `
+            /out:dist\EpsPrint-Setup.exe /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll `
+            /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll `
+            /resource:dist\payload.zip,payload.zip setup\Setup.cs shared\Version.cs
+          if ($LASTEXITCODE -ne 0) { throw "Не удалось собрать установщик" }
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$env:VERSION" dist\EpsPrint-Setup.exe dist\EpsPrint-update.zip `
+            --title "v$env:VERSION" --notes-file release-notes.md --target $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw "Не удалось создать релиз" }
+

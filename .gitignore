@@ -1,0 +1,5 @@
+# Build output
+dist/
+update.ini
+shared/Version.cs
+keys/

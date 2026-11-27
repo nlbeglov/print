@@ -1,0 +1,4 @@
+# Optional settings for Updater.exe (put next to EpsPrint.exe as update.ini).
+# By default updates come from the public repository nlbeglov/print - no file needed.
+# repo=owner/repository
+# token=   (only needed if the repository becomes private)
