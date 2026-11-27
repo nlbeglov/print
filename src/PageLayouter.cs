@@ -49,6 +49,7 @@ namespace EpsPrint
                 float s;
                 if (o.Scale == ScaleMode.Fit) s = Math.Min(availW / w, availH / h);
                 else if (o.Scale == ScaleMode.Actual) s = 1f;
+                else if (o.Scale == ScaleMode.Box) s = Math.Min(Math.Max(1f, o.BoxWmm) / w, Math.Max(1f, o.BoxHmm) / h);
                 else s = o.Percent / 100f;
                 w *= s;
                 h *= s;

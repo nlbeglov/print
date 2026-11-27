@@ -40,7 +40,7 @@ namespace EpsPrint
         public float PaperWmm, PaperHmm;   // свой размер листа (этикетки); 0 — общий размер бумаги
     }
 
-    enum ScaleMode { Fit, Actual, Custom }
+    enum ScaleMode { Fit, Actual, Custom, Box }
 
     class LayoutOptions
     {
@@ -48,11 +48,15 @@ namespace EpsPrint
         public float MarginMm, GapMm;
         public ScaleMode Scale;
         public float Percent;
+        public float BoxWmm, BoxHmm;   // ScaleMode.Box: рисунок вписывается в этот размер (пропорции сохраняются)
         public bool MultiPerSheet, Rotate90, Collate;
         public int Copies;
     }
 
-    /// <summary>Размер наклейки в рулоне (ширина поперёк принтера × длина по ходу).</summary>
+    /// <summary>
+    /// Размер наклейки в рулоне. W — поперёк принтера, H — вдоль (по ходу печати).
+    /// Показывается так, как привыкли пользователи: «вдоль × поперёк» (наклейка 30 на 40 = 30 вдоль, 40 поперёк).
+    /// </summary>
     class StickerItem
     {
         public float W, H;
@@ -65,7 +69,7 @@ namespace EpsPrint
 
         public override string ToString()
         {
-            return IsCustom ? "Свой размер…" : string.Format("{0:0.#} × {1:0.#} мм", W, H);
+            return IsCustom ? "Свой размер…" : string.Format("{0:0.#} × {1:0.#} мм", H, W);
         }
     }
 

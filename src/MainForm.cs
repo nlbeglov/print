@@ -46,7 +46,11 @@ namespace EpsPrint
         Label printerKindLabel, sizeHeader;
         Control paperSizeRow, stickerSizeRow, rangeRow;
         NumericUpDown customW, customH, stickerW, stickerH, copiesNum;
-        RadioButton fitRb, actualRb;
+        RadioButton fitRb, actualRb, boxRb;
+        NumericUpDown boxW, boxH;
+        Control boxRow;
+        ToolTip listTip = new ToolTip();
+        int tipIndex = -1;
         CheckBox rotateCb, multiCb;
         TextBox rangeBox;
         Button printBtn;
@@ -131,6 +135,15 @@ namespace EpsPrint
             fileList = new CheckedListBox { Dock = DockStyle.Fill, CheckOnClick = true, IntegralHeight = false, HorizontalScrollbar = true };
             fileList.ItemCheck += (s, e) => { if (!suppressCheckEvents) BeginInvoke(new Action(RebuildPages)); };
             fileList.SelectedIndexChanged += (s, e) => JumpToSelected();
+            fileList.MouseMove += (s, e) =>
+            {
+                int i = fileList.IndexFromPoint(e.Location);
+                if (i == tipIndex) return;
+                tipIndex = i;
+                if (i < 0 || i >= fileList.Items.Count) { listTip.SetToolTip(fileList, ""); return; }
+                var it = (EpsItem)fileList.Items[i];
+                listTip.SetToolTip(fileList, it.ToString() + (it.Gtin != null ? "\nGTIN " + it.Gtin : "") + "\nФайл: " + it.Name);
+            };
             left.Controls.Add(fileList, 0, 1);
             var selBar = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
             var allBtn = new Button { Text = "Выбрать все", AutoSize = true };
@@ -192,7 +205,9 @@ namespace EpsPrint
             right.Controls.Add(stickerCombo);
             stickerW = Num(5, 300, 1, 40);
             stickerH = Num(5, 500, 1, 30);
-            stickerSizeRow = SizeRow("Ширина × длина:", stickerW, stickerH);
+            stickerSizeRow = Group(FlowDirection.TopDown,
+                SizeRow("Вдоль × поперёк:", stickerH, stickerW),
+                new Label { Text = "вдоль — по ходу печати, поперёк — ширина рулона", AutoSize = true, ForeColor = Color.DimGray, Margin = new Padding(3, 0, 3, 3) });
             right.Controls.Add(stickerSizeRow);
             paperCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = W, DropDownHeight = 400 };
             paperCombo.SelectedIndexChanged += (s, e) => RebuildPages();
@@ -203,11 +218,18 @@ namespace EpsPrint
             right.Controls.Add(paperSizeRow);
 
             // 3. Рисунок
-            right.Controls.Add(Header("3. Рисунок"));
-            actualRb = Radio("Как в файле (настоящий размер)");
+            right.Controls.Add(Header("3. Размер рисунка"));
+            actualRb = Radio("Как в файле");
             fitRb = Radio("Растянуть на всю наклейку");
+            boxRb = Radio("Задать размер:");
             actualRb.Checked = true;
-            right.Controls.Add(Group(FlowDirection.TopDown, actualRb, fitRb));
+            right.Controls.Add(Group(FlowDirection.TopDown, actualRb, fitRb, boxRb));
+            boxW = Num(1, 1000, 1, 20);
+            boxH = Num(1, 1000, 1, 20);
+            boxW.Enter += (s, e) => boxRb.Checked = true;
+            boxH.Enter += (s, e) => boxRb.Checked = true;
+            boxRow = SizeRow("     ", boxH, boxW);   // тот же порядок: вдоль × поперёк
+            right.Controls.Add(boxRow);
             rotateCb = Check("Повернуть на 90°");
             right.Controls.Add(rotateCb);
             multiCb = Check("Несколько рисунков на одном листе");
@@ -546,9 +568,12 @@ namespace EpsPrint
             bool land = settings.Get("orientation", "p") == "l";
             landscapeRb.Checked = land;
             portraitRb.Checked = !land;
-            bool fit = settings.Get("scale", "actual") == "fit";
-            fitRb.Checked = fit;
-            actualRb.Checked = !fit;
+            string sc = settings.Get("scale", "actual");
+            fitRb.Checked = sc == "fit";
+            boxRb.Checked = sc == "box";
+            actualRb.Checked = sc != "fit" && sc != "box";
+            SetNum(boxW, settings.GetNum("boxW", 20));
+            SetNum(boxH, settings.GetNum("boxH", 20));
             customScaleCb.Checked = settings.GetBool("customScale", false);
             SetNum(percentNum, settings.GetNum("percent", 100));
             rotateCb.Checked = settings.GetBool("rotate", false);
@@ -568,7 +593,9 @@ namespace EpsPrint
             settings.Set("stickerW", stickerW.Value);
             settings.Set("stickerH", stickerH.Value);
             settings.Set("orientation", landscapeRb.Checked ? "l" : "p");
-            settings.Set("scale", fitRb.Checked ? "fit" : "actual");
+            settings.Set("scale", fitRb.Checked ? "fit" : boxRb.Checked ? "box" : "actual");
+            settings.Set("boxW", boxW.Value);
+            settings.Set("boxH", boxH.Value);
             settings.Set("customScale", customScaleCb.Checked);
             settings.Set("percent", percentNum.Value);
             settings.Set("rotate", rotateCb.Checked);
@@ -802,10 +829,10 @@ namespace EpsPrint
                 if (products.TryGetValue(it.Gtin, out a))
                 {
                     string name = Attr(a, "name") ?? Attr(a, "fullName");
-                    if (name != null) it.DisplayName = name + " — №" + (it.CodeIndex + 1);
+                    if (name != null) it.DisplayName = "№" + (it.CodeIndex + 1) + "  " + name;
                 }
             }
-            fileList.Invalidate();
+            UpdateListExtent();
 
             var sb = new StringBuilder();
             foreach (var kv in products)
@@ -833,6 +860,16 @@ namespace EpsPrint
                 sb.Append("── " + raw.Item1 + " ──\r\n").Append(body.Replace("\r\n", "\n").Replace("\n", "\r\n"));
             }
             infoBox.Text = sb.ToString();
+        }
+
+        /// <summary>Горизонтальная прокрутка списка под самое длинное название.</summary>
+        void UpdateListExtent()
+        {
+            int max = 0;
+            foreach (object o in fileList.Items)
+                max = Math.Max(max, TextRenderer.MeasureText(o.ToString(), fileList.Font).Width);
+            fileList.HorizontalExtent = max + 30;
+            fileList.Invalidate();
         }
 
         static void Line(StringBuilder sb, string label, string value)
@@ -895,7 +932,7 @@ namespace EpsPrint
                             SetStatus("Ошибка: " + cur.DisplayName);
                             MessageBox.Show(this, cur.DisplayName + "\n\n" + ex.Message, "Не удалось открыть файл", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         }
-                        fileList.Invalidate();
+                        UpdateListExtent();
                         RebuildPages();
                     }
                 } while (renderAgain);
@@ -949,7 +986,9 @@ namespace EpsPrint
             o.PaperWmm = w;
             o.PaperHmm = h;
             o.GapMm = (float)gapNum.Value;
-            o.Scale = customScaleCb.Checked ? ScaleMode.Custom : fitRb.Checked ? ScaleMode.Fit : ScaleMode.Actual;
+            o.Scale = customScaleCb.Checked ? ScaleMode.Custom : fitRb.Checked ? ScaleMode.Fit : boxRb.Checked ? ScaleMode.Box : ScaleMode.Actual;
+            o.BoxWmm = (float)boxW.Value;
+            o.BoxHmm = (float)boxH.Value;
             o.Percent = (float)percentNum.Value;
             o.Rotate90 = rotateCb.Checked;
             o.Collate = collateCb.Checked;
@@ -981,7 +1020,8 @@ namespace EpsPrint
             paperCombo.Visible = !label;
             paperSizeRow.Visible = !label && pi != null && pi.IsCustom;
             fitRb.Text = label ? "Растянуть на всю наклейку" : "Растянуть на весь лист";
-            actualRb.Enabled = fitRb.Enabled = !customScaleCb.Checked;
+            actualRb.Enabled = fitRb.Enabled = boxRb.Enabled = !customScaleCb.Checked;
+            boxRow.Enabled = boxRb.Checked && !customScaleCb.Checked;
             percentNum.Enabled = customScaleCb.Checked;
             multiCb.Visible = !label;
             multiCb.Enabled = !fitRb.Checked || customScaleCb.Checked;
@@ -1024,7 +1064,7 @@ namespace EpsPrint
             sb.AppendFormat("Выбрано файлов: {0}\n", sel.Count);
             if (chosen == null) sb.Append("⚠ " + rangeErr);
             else sb.AppendFormat("{0} к печати: {1}", unit, chosen.Count);
-            if (labelMode) sb.AppendFormat("\nНаклейка {0:0.#} × {1:0.#} мм", o.PaperWmm, o.PaperHmm);
+            if (labelMode) sb.AppendFormat("\nНаклейка {0:0.#} × {1:0.#} мм (вдоль × поперёк)", o.PaperHmm, o.PaperWmm);
             if (layoutWarning != null) sb.Append("\n\n⚠ " + layoutWarning);
             summaryLabel.Text = sb.ToString();
             summaryLabel.ForeColor = (layoutWarning != null || chosen == null) ? Color.DarkRed : SystemColors.ControlText;
@@ -1316,8 +1356,8 @@ namespace EpsPrint
                                 }
                                 canvas.Blit(img, (int)Math.Round((p.Rect.X + offX) * dpmm), (int)Math.Round((p.Rect.Y + offY) * dpmm));
                             }
-                            if (lang == LabelLanguage.Epl) LabelPrinter.AppendEpl(ms, canvas, run.Item2, gapDots);
-                            else LabelPrinter.AppendZpl(ms, canvas, run.Item2);
+                            if (lang == LabelLanguage.Epl) LabelPrinter.AppendEpl(ms, canvas, run.Item2, gapDots, maxDots);
+                            else LabelPrinter.AppendZpl(ms, canvas, run.Item2, maxDots);
                         }
                         return ms.ToArray();
                     }

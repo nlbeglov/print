@@ -124,14 +124,19 @@ namespace EpsPrint
 
         // ───────── Команды принтера ─────────
 
-        /// <summary>Одна этикетка (copies штук) в EPL2 — TLP 2844, LP 2844 и т.п.</summary>
-        public static void AppendEpl(Stream s, MonoImage img, int copies, int gapDots)
+        /// <summary>
+        /// Одна наклейка (copies штук) в EPL2 — TLP 2844, LP 2844 и т.п.
+        /// Наклейка лежит по центру головки, а отсчёт X идёт от левого края головки,
+        /// поэтому картинку размером с наклейку ставим в X = (ширина головки − ширина наклейки) / 2.
+        /// </summary>
+        public static void AppendEpl(Stream s, MonoImage img, int copies, int gapDots, int headDots)
         {
+            int x = Math.Max(0, (headDots - img.Width) / 2);
             Ascii(s, "\r\nN\r\n");
-            Ascii(s, "q" + img.Width + "\r\n");                       // ширина этикетки (принтер центрирует)
-            Ascii(s, "Q" + img.Height + "," + gapDots + "\r\n");       // длина этикетки и зазор
+            Ascii(s, "q" + Math.Max(headDots, img.Width) + "\r\n");   // вся ширина головки
+            Ascii(s, "Q" + img.Height + "," + gapDots + "\r\n");       // длина наклейки и зазор
             Ascii(s, "R0,0\r\nZT\r\n");
-            Ascii(s, "GW0,0," + img.Stride + "," + img.Height + ",");
+            Ascii(s, "GW" + x + ",0," + img.Stride + "," + img.Height + ",");
             // В EPL бит 0 = чёрная точка, поэтому инвертируем
             var row = new byte[img.Stride];
             for (int y = 0; y < img.Height; y++)
@@ -143,12 +148,13 @@ namespace EpsPrint
         }
 
         /// <summary>Одна этикетка (copies штук) в ZPL — модели с «-Z», GK/GX/ZD и т.п.</summary>
-        public static void AppendZpl(Stream s, MonoImage img, int copies)
+        public static void AppendZpl(Stream s, MonoImage img, int copies, int headDots)
         {
             int total = img.Stride * img.Height;
+            int x = Math.Max(0, (headDots - img.Width) / 2);
             var sb = new StringBuilder();
-            sb.Append("^XA^MNY^LH0,0^PW").Append(img.Width).Append("^LL").Append(img.Height);
-            sb.Append("^FO0,0^GFA,").Append(total).Append(',').Append(total).Append(',').Append(img.Stride).Append(',');
+            sb.Append("^XA^MNY^LH0,0^PW").Append(Math.Max(headDots, img.Width)).Append("^LL").Append(img.Height);
+            sb.Append("^FO").Append(x).Append(",0^GFA,").Append(total).Append(',').Append(total).Append(',').Append(img.Stride).Append(',');
             const string hex = "0123456789ABCDEF";
             foreach (byte b in img.Bits) { sb.Append(hex[b >> 4]); sb.Append(hex[b & 15]); }
             sb.Append("^FS^PQ").Append(copies).Append("^XZ\r\n");
