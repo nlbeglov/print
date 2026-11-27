@@ -89,25 +89,51 @@ namespace EpsPrintUpdater
                 LoadConfig();
                 current = Normalize(AssemblyName.GetAssemblyName(Path.Combine(appDir, "EpsPrint.exe")).Version);
 
-                string json = await Task.Run(() => GetText("https://api.github.com/repos/" + repo + "/releases/latest"));
-                var rel = new JavaScriptSerializer().DeserializeObject(json) as Dictionary<string, object>;
-                if (rel == null) throw new Exception("Неожиданный ответ GitHub.");
+                // 1) Обычные страницы github.com (как в браузере) — без лимита API в 60 запросов/час
+                string tag = null, body = null;
+                Exception webError = null;
+                try
+                {
+                    tag = await Task.Run(() => LatestTagViaWeb());
+                    zipUrl = "https://github.com/" + repo + "/releases/download/" + Uri.EscapeDataString(tag) + "/" + AssetZip;
+                }
+                catch (Exception ex) { webError = ex; }
 
-                string tag = rel.ContainsKey("tag_name") ? rel["tag_name"] as string : null;
+                // 2) Запасной путь — API GitHub (там же берём описание «что нового», если получится)
+                Dictionary<string, object> rel = null;
+                try
+                {
+                    string json = await Task.Run(() => GetText("https://api.github.com/repos/" + repo + "/releases/latest"));
+                    rel = new JavaScriptSerializer().DeserializeObject(json) as Dictionary<string, object>;
+                }
+                catch (Exception apiError)
+                {
+                    if (tag == null) throw webError ?? apiError;
+                }
+                if (rel != null)
+                {
+                    string apiTag = rel.ContainsKey("tag_name") ? rel["tag_name"] as string : null;
+                    if (tag == null || tag == apiTag)
+                    {
+                        body = rel.ContainsKey("body") ? rel["body"] as string : null;
+                        if (tag == null)
+                        {
+                            tag = apiTag;
+                            var assets = rel.ContainsKey("assets") ? rel["assets"] as IEnumerable : null;
+                            if (assets != null)
+                                foreach (var a in assets)
+                                {
+                                    var d = a as Dictionary<string, object>;
+                                    if (d != null && d["name"] as string == AssetZip) zipUrl = d["url"] as string;
+                                }
+                        }
+                    }
+                }
+
                 Version v;
                 if (tag == null || !Version.TryParse(tag.TrimStart('v', 'V'), out v))
                     throw new Exception("Не удалось понять версию последнего релиза: " + tag);
                 latest = Normalize(v);
-
-                var assets = rel.ContainsKey("assets") ? rel["assets"] as IEnumerable : null;
-                if (assets != null)
-                    foreach (var a in assets)
-                    {
-                        var d = a as Dictionary<string, object>;
-                        if (d == null) continue;
-                        string name = d["name"] as string, url = d["url"] as string;
-                        if (name == AssetZip) zipUrl = url;
-                    }
 
                 bar.Style = ProgressBarStyle.Continuous;
                 if (latest <= current)
@@ -119,7 +145,6 @@ namespace EpsPrintUpdater
                     throw new Exception("В релизе " + tag + " нет файла " + AssetZip + ".");
 
                 status.Text = "Доступна новая версия " + Short(latest) + " (у вас " + Short(current) + ").";
-                string body = rel.ContainsKey("body") ? rel["body"] as string : null;
                 if (!string.IsNullOrEmpty(body))
                 {
                     notes.Text = body.Replace("\r\n", "\n").Replace("\n", "\r\n");
@@ -312,8 +337,9 @@ namespace EpsPrintUpdater
         {
             var uri = new Uri(url);
             bool github = uri.Host == "api.github.com";
+            bool web = uri.Host == "github.com";
             bool assetHost = uri.Host.EndsWith(".githubusercontent.com", StringComparison.OrdinalIgnoreCase);
-            if (uri.Scheme != Uri.UriSchemeHttps || !(github || assetHost))
+            if (uri.Scheme != Uri.UriSchemeHttps || !(github || web || assetHost))
                 throw new Exception("Отклонён запрос к неразрешённому адресу: " + uri.Host);
 
             var r = (HttpWebRequest)WebRequest.Create(uri);
@@ -327,6 +353,25 @@ namespace EpsPrintUpdater
             if (withToken && github && token != null)   // токен (если задан) отправляется только на api.github.com
                 r.Headers["Authorization"] = "Bearer " + token;
             return r;
+        }
+
+        /// <summary>github.com/…/releases/latest перенаправляет на …/releases/tag/vX.Y.Z — берём тег из адреса.</summary>
+        string LatestTagViaWeb()
+        {
+            EnsureTls();
+            using (var resp = Send(Request("https://github.com/" + repo + "/releases/latest", false, "text/html")))
+            {
+                int code = (int)resp.StatusCode;
+                string loc = resp.Headers["Location"];
+                if (code < 300 || code >= 400 || string.IsNullOrEmpty(loc))
+                    throw new Exception("На GitHub ещё нет ни одного релиза.");
+                const string marker = "/releases/tag/";
+                int i = loc.IndexOf(marker, StringComparison.Ordinal);
+                if (i < 0) throw new Exception("На GitHub ещё нет ни одного релиза.");
+                string tag = Uri.UnescapeDataString(loc.Substring(i + marker.Length).Split('?', '#', '/')[0]);
+                if (!Regex.IsMatch(tag, @"^[vV]?\d+\.\d+\.\d+$")) throw new Exception("Странный тег релиза: " + tag);
+                return tag;
+            }
         }
 
         string GetText(string url)
@@ -384,9 +429,21 @@ namespace EpsPrintUpdater
                 var resp = ex.Response as HttpWebResponse;
                 if (resp == null) throw new Exception("Нет связи с GitHub: " + ex.Message);
                 int code = (int)resp.StatusCode;
+                string text = "";
+                try
+                {
+                    using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                    {
+                        var buf = new char[400];
+                        text = new string(buf, 0, sr.Read(buf, 0, buf.Length)).Trim();
+                    }
+                }
+                catch { }
                 resp.Close();
                 if (code == 401) throw new Exception("GitHub не принял токен из update.ini (401).");
-                if (code == 403) throw new Exception("GitHub временно ограничил запросы (403). Попробуйте через час.");
+                if ((code == 403 || code == 429) && text.IndexOf("rate limit", StringComparison.OrdinalIgnoreCase) >= 0)
+                    throw new Exception("GitHub ограничил число запросов с вашего интернет-адреса (" + code + "). Попробуйте позже.\n\n" + text);
+                if (code == 403) throw new Exception("GitHub отказал в доступе (403).\n\n" + text);
                 if (code == 404) throw new Exception("Не найден репозиторий или релиз (404). Возможно, репозиторий закрыт или ещё нет ни одного релиза.");
                 throw new Exception("Ошибка GitHub: HTTP " + code);
             }
