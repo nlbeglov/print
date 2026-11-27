@@ -125,17 +125,26 @@ namespace EpsPrint
         // ───────── Команды принтера ─────────
 
         /// <summary>
+        /// Настройки EPL2 один раз на всю печать: ширина печати, длина наклейки и зазор.
+        /// Если слать их перед каждой наклейкой, некоторые принтеры протягивают лишнюю пустую.
+        /// </summary>
+        public static void AppendEplSetup(Stream s, int headDots, int labelDots, int gapDots)
+        {
+            Ascii(s, "\r\n");
+            Ascii(s, "q" + headDots + "\r\n");                       // вся ширина головки
+            Ascii(s, "Q" + labelDots + "," + gapDots + "\r\n");      // длина наклейки и зазор
+            Ascii(s, "R0,0\r\nZT\r\n");
+        }
+
+        /// <summary>
         /// Одна наклейка (copies штук) в EPL2 — TLP 2844, LP 2844 и т.п.
         /// Наклейка лежит по центру головки, а отсчёт X идёт от левого края головки,
         /// поэтому картинку размером с наклейку ставим в X = (ширина головки − ширина наклейки) / 2.
         /// </summary>
-        public static void AppendEpl(Stream s, MonoImage img, int copies, int gapDots, int headDots)
+        public static void AppendEpl(Stream s, MonoImage img, int copies, int headDots)
         {
             int x = Math.Max(0, (headDots - img.Width) / 2);
-            Ascii(s, "\r\nN\r\n");
-            Ascii(s, "q" + Math.Max(headDots, img.Width) + "\r\n");   // вся ширина головки
-            Ascii(s, "Q" + img.Height + "," + gapDots + "\r\n");       // длина наклейки и зазор
-            Ascii(s, "R0,0\r\nZT\r\n");
+            Ascii(s, "N\r\n");
             Ascii(s, "GW" + x + ",0," + img.Stride + "," + img.Height + ",");
             // В EPL бит 0 = чёрная точка, поэтому инвертируем
             var row = new byte[img.Stride];

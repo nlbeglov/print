@@ -1334,12 +1334,34 @@ namespace EpsPrint
                         runs.Add(Tuple.Create(pg, 1));
                 }
 
+                // Размер наклеек поменялся с прошлой печати — предложить калибровку, чтобы первая не съехала
+                string sizeKey = wDots + "x" + hDots + "|" + lang;
+                string lastKey = settings.Get("lastSize|" + printer, null);
+                bool calibrate = false;
+                if (lastKey != null && lastKey != sizeKey)
+                {
+                    var answer = MessageBox.Show(this,
+                        "Размер наклеек изменился с прошлой печати.\n\n" +
+                        "Откалибровать принтер перед печатью? Он протянет 1–3 пустые наклейки, " +
+                        "зато первая наклейка не съедет.\n\n" +
+                        "Да — откалибровать и печатать\nНет — печатать сразу",
+                        "Размер наклеек изменился", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+                    if (answer == DialogResult.Cancel) { SetStatus("Печать отменена"); return; }
+                    calibrate = answer == DialogResult.Yes;
+                }
+
                 SetStatus("Подготовка наклеек…");
                 byte[] data = await Task.Run(() =>
                 {
                     var cache = new Dictionary<string, MonoImage>();
                     using (var ms = new MemoryStream())
                     {
+                        if (calibrate)
+                        {
+                            var cal = LabelPrinter.CalibrateCommand(lang);
+                            ms.Write(cal, 0, cal.Length);
+                        }
+                        if (lang == LabelLanguage.Epl) LabelPrinter.AppendEplSetup(ms, maxDots, hDots, gapDots);
                         foreach (var run in runs)
                         {
                             var canvas = MonoImage.Blank(wDots, hDots);
@@ -1356,7 +1378,7 @@ namespace EpsPrint
                                 }
                                 canvas.Blit(img, (int)Math.Round((p.Rect.X + offX) * dpmm), (int)Math.Round((p.Rect.Y + offY) * dpmm));
                             }
-                            if (lang == LabelLanguage.Epl) LabelPrinter.AppendEpl(ms, canvas, run.Item2, gapDots, maxDots);
+                            if (lang == LabelLanguage.Epl) LabelPrinter.AppendEpl(ms, canvas, run.Item2, maxDots);
                             else LabelPrinter.AppendZpl(ms, canvas, run.Item2, maxDots);
                         }
                         return ms.ToArray();
@@ -1366,6 +1388,7 @@ namespace EpsPrint
                 SetStatus("Отправка на принтер…");
                 await Task.Run(() => RawPrinter.Send(printer, "EPS наклейки (" + toPrint.Count + ")", data));
                 SetStatus("Отправлено наклеек: " + toPrint.Count);
+                settings.Set("lastSize|" + printer, sizeKey);
                 SaveSettings();
             }
             catch (Exception ex)
